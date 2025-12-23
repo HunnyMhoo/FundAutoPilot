@@ -13,15 +13,20 @@ Environment variables required:
 
 import time
 import logging
+import asyncio
 from datetime import datetime
 from typing import Any
 
 import requests
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.database import sync_engine, SyncSessionLocal, Base
+from app.core.elasticsearch import get_elasticsearch_client
 from app.models.fund_orm import AMC, Fund
+from app.utils.normalization import normalize_search_text
+from app.services.search.elasticsearch_backend import ElasticsearchSearchBackend
 
 # Configure logging
 logging.basicConfig(
@@ -50,8 +55,14 @@ class SECFundIngester:
             "funds_fetched": 0,
             "funds_active": 0,
             "funds_stored": 0,
+            "funds_indexed": 0,
             "errors": 0,
         }
+        # Initialize Elasticsearch backend if enabled
+        if self.settings.elasticsearch_enabled:
+            self.search_backend = ElasticsearchSearchBackend(get_elasticsearch_client())
+        else:
+            self.search_backend = None
     
     def fetch_amcs(self) -> list[dict[str, Any]]:
         """Fetch all Asset Management Companies from SEC API."""
@@ -104,19 +115,29 @@ class SECFundIngester:
         logger.info(f"Stored {len(amcs)} AMCs")
     
     def store_funds(self, session, funds: list[dict[str, Any]], amc_id: str) -> int:
-        """Upsert active funds into database. Returns count stored."""
+        """Upsert active funds into database and sync to Elasticsearch. Returns count stored."""
         stored = 0
+        es_docs = []  # Collect documents for bulk indexing
         
         for fund_data in funds:
             # Only store active (RG) funds
             if fund_data.get("fund_status") != "RG":
                 continue
             
+            fund_name_en = fund_data.get("proj_name_en", fund_data.get("proj_name_th", "Unknown"))
+            fund_abbr = fund_data.get("proj_abbr_name")
+            
+            # Normalize fields for search
+            fund_name_norm = normalize_search_text(fund_name_en)
+            fund_abbr_norm = normalize_search_text(fund_abbr) if fund_abbr else None
+            
             stmt = insert(Fund).values(
                 proj_id=fund_data["proj_id"],
                 fund_name_th=fund_data.get("proj_name_th"),
-                fund_name_en=fund_data.get("proj_name_en", fund_data.get("proj_name_th", "Unknown")),
-                fund_abbr=fund_data.get("proj_abbr_name"),
+                fund_name_en=fund_name_en,
+                fund_abbr=fund_abbr,
+                fund_name_norm=fund_name_norm,
+                fund_abbr_norm=fund_abbr_norm,
                 amc_id=amc_id,
                 fund_status=fund_data["fund_status"],
                 regis_date=self._parse_date(fund_data.get("regis_date")),
@@ -132,6 +153,8 @@ class SECFundIngester:
                     "fund_name_th": stmt.excluded.fund_name_th,
                     "fund_name_en": stmt.excluded.fund_name_en,
                     "fund_abbr": stmt.excluded.fund_abbr,
+                    "fund_name_norm": stmt.excluded.fund_name_norm,
+                    "fund_abbr_norm": stmt.excluded.fund_abbr_norm,
                     "fund_status": stmt.excluded.fund_status,
                     "regis_date": stmt.excluded.regis_date,
                     "category": stmt.excluded.category,
@@ -141,6 +164,49 @@ class SECFundIngester:
             )
             session.execute(stmt)
             stored += 1
+            
+            # Prepare Elasticsearch document
+            if self.search_backend:
+                # Get AMC name for denormalization
+                amc_result = session.execute(
+                    select(AMC.name_en).where(AMC.unique_id == amc_id)
+                )
+                amc_name = amc_result.scalar_one_or_none() or "Unknown"
+                
+                # Calculate fee_band (None for now since expense_ratio not available)
+                fee_band = None
+                
+                es_docs.append({
+                    "fund_id": fund_data["proj_id"],
+                    "fund_name": fund_name_en,
+                    "fund_name_norm": fund_name_norm,
+                    "fund_abbr": fund_abbr,
+                    "fund_abbr_norm": fund_abbr_norm,
+                    "amc_id": amc_id,
+                    "amc_name": amc_name,
+                    "category": self._infer_category(fund_data),
+                    "risk_level": None,
+                    "expense_ratio": None,
+                    "fee_band": fee_band,
+                    "fund_status": fund_data["fund_status"],
+                })
+        
+        # Bulk index to Elasticsearch (async in sync context)
+        if self.search_backend and es_docs:
+            try:
+                # Create new event loop for async operations
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
+                loop.run_until_complete(self.search_backend.initialize_index())
+                loop.run_until_complete(self.search_backend.bulk_index_funds(es_docs))
+                self.stats["funds_indexed"] += len(es_docs)
+            except Exception as e:
+                logger.warning(f"Failed to index funds to Elasticsearch: {e}")
+                self.stats["errors"] += 1
         
         return stored
     
@@ -221,6 +287,14 @@ class SECFundIngester:
         
         duration = time.time() - start_time
         
+        # Close Elasticsearch connection
+        if self.search_backend:
+            try:
+                loop = asyncio.get_event_loop()
+                loop.run_until_complete(self.search_backend.close())
+            except Exception as e:
+                logger.warning(f"Error closing Elasticsearch connection: {e}")
+        
         # Final summary
         logger.info("=" * 60)
         logger.info("INGESTION COMPLETE")
@@ -230,6 +304,8 @@ class SECFundIngester:
         logger.info(f"  Funds fetched: {self.stats['funds_fetched']}")
         logger.info(f"  Active funds: {self.stats['funds_active']}")
         logger.info(f"  Funds stored: {self.stats['funds_stored']}")
+        if self.search_backend:
+            logger.info(f"  Funds indexed to Elasticsearch: {self.stats['funds_indexed']}")
         logger.info(f"  Errors: {self.stats['errors']}")
         logger.info("=" * 60)
         

@@ -94,6 +94,11 @@ export function useFundCatalog(initialAsOfDate?: string) {
     const updateSearch = (q: string) => {
         setSearchQuery(q);
     };
+    
+    // Clear search while preserving filters and sort
+    const clearSearch = () => {
+        setSearchQuery('');
+    };
 
     // 2. Filter Updates
     const toggleFilter = (type: keyof FundFilters, value: string) => {
@@ -154,6 +159,7 @@ export function useFundCatalog(initialAsOfDate?: string) {
         sort,
         // Actions
         updateSearch,
+        clearSearch,
         toggleFilter,
         clearFilters,
         removeFilter,

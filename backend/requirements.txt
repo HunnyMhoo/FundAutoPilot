@@ -17,6 +17,10 @@ numpy
 # HTTP client for ingestion
 requests
 
+# Elasticsearch (version 8.x to match server version 8.11.0)
+elasticsearch>=8.11.0,<9.0.0
+aiohttp>=3.9.0
+
 # Testing
 pytest
 pytest-asyncio

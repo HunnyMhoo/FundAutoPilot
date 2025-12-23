@@ -5,6 +5,7 @@ import { FundCard } from './FundCard';
 import { SkeletonLoader } from './SkeletonLoader';
 import { LoadMoreButton } from './LoadMoreButton';
 import { ErrorState } from './ErrorState';
+import { EmptyState } from './EmptyState';
 import SearchInput from './SearchInput'; // Assuming default export
 import { FilterPanel } from './FilterPanel';
 import { SortControl } from './SortControl';
@@ -26,6 +27,7 @@ export function FundCatalog({ initialAsOfDate }: FundCatalogProps) {
         filters,
         sort,
         updateSearch,
+        clearSearch,
         toggleFilter,
         clearFilters,
         removeFilter,
@@ -121,27 +123,27 @@ export function FundCatalog({ initialAsOfDate }: FundCatalogProps) {
                     />
 
                     {/* Results Info */}
-                    {(searchQuery || funds.length > 0) && (
-                        <div className="mb-4 text-sm text-gray-500">
-                            {state === 'idle' && funds.length === 0 ? (
-                                <span>No results found</span>
-                            ) : (
-                                <span>Showing {funds.length} funds</span>
+                    {searchQuery && (
+                        <div className="mb-4 text-sm text-gray-600">
+                            <span>Showing results for '{searchQuery}'</span>
+                            {funds.length > 0 && (
+                                <span className="ml-2 text-gray-500">({funds.length} {funds.length === 1 ? 'fund' : 'funds'})</span>
                             )}
                         </div>
                     )}
-
-                    {/* Empty State (Filtered) */}
-                    {state === 'idle' && funds.length === 0 && !error && (
-                        <div className="text-center py-12 bg-gray-50 rounded-lg border border-gray-100">
-                            <p className="text-gray-500 mb-4">No funds matching your specific criteria.</p>
-                            <button
-                                onClick={clearFilters}
-                                className="text-brand-primary font-medium hover:underline"
-                            >
-                                Clear all filters
-                            </button>
+                    {!searchQuery && funds.length > 0 && (
+                        <div className="mb-4 text-sm text-gray-500">
+                            <span>Showing {funds.length} funds</span>
                         </div>
+                    )}
+
+                    {/* Empty State */}
+                    {state === 'idle' && funds.length === 0 && !error && (
+                        <EmptyState
+                            onRetry={reload}
+                            searchQuery={searchQuery}
+                            onClearSearch={clearSearch}
+                        />
                     )}
 
                     {/* Grid */}

@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     # API Settings
     api_page_size: int = 25
     
+    # Elasticsearch Settings
+    elasticsearch_url: str = "http://localhost:9200"
+    elasticsearch_index_funds: str = "funds"
+    elasticsearch_enabled: bool = True  # Feature flag for search backend
+    
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
