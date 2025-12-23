@@ -1,0 +1,41 @@
+.badge {
+    background: rgba(129, 140, 248, 0.1);
+    border: 1px solid rgba(129, 140, 248, 0.2);
+    border-radius: 12px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1.5rem;
+}
+
+.badgeContent {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.label {
+    font-size: 0.875rem;
+    color: rgba(255, 255, 255, 0.6);
+    font-weight: 500;
+}
+
+.date {
+    font-size: 0.95rem;
+    color: #818cf8;
+    font-weight: 600;
+}
+
+.secondaryDate {
+    font-size: 0.75rem;
+    color: rgba(255, 255, 255, 0.5);
+    font-style: italic;
+}
+
+.source {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid rgba(129, 140, 248, 0.1);
+    font-size: 0.75rem;
+    color: rgba(255, 255, 255, 0.4);
+}
+

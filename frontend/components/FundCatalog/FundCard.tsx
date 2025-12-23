@@ -1,6 +1,7 @@
 'use client';
 
 import { FundSummary } from '@/types/fund';
+import { useSearchParams, usePathname } from 'next/navigation';
 import Link from 'next/link';
 import styles from './FundCard.module.css';
 
@@ -9,8 +10,17 @@ interface FundCardProps {
 }
 
 export function FundCard({ fund }: FundCardProps) {
+    const searchParams = useSearchParams();
+    const pathname = usePathname();
+    
+    // Preserve current catalog state in URL for back navigation
+    // Construct the 'from' URL with current query params
+    const currentQuery = searchParams.toString();
+    const fromUrl = currentQuery ? `${pathname}?${currentQuery}` : pathname;
+    const detailUrl = `/funds/${fund.fund_id}?from=${encodeURIComponent(fromUrl)}`;
+    
     return (
-        <Link href={`/funds/${fund.fund_id}`} className={styles.card}>
+        <Link href={detailUrl} className={styles.card}>
             <div className={styles.header}>
                 <h3 className={styles.name}>{fund.fund_name}</h3>
                 <span className={styles.abbr}>{fund.fund_id}</span>

@@ -2,7 +2,7 @@
  * API client for fund endpoints
  */
 
-import { FundListResponse } from '@/types/fund';
+import { FundListResponse, FundDetail } from '@/types/fund';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -74,4 +74,26 @@ export async function fetchFundCount(): Promise<number> {
 
     const data = await response.json();
     return data.count;
+}
+
+export async function fetchFundDetail(fundId: string): Promise<FundDetail> {
+    const response = await fetch(`${API_BASE_URL}/funds/${encodeURIComponent(fundId)}`, {
+        method: 'GET',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+    });
+
+    if (!response.ok) {
+        if (response.status === 404) {
+            throw new Error(`Fund not found: ${fundId}`);
+        }
+        if (response.status === 400) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.detail || `Invalid fund ID: ${fundId}`);
+        }
+        throw new Error(`Failed to fetch fund details: ${response.status} ${response.statusText}`);
+    }
+
+    return response.json();
 }

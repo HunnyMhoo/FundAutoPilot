@@ -1,10 +1,12 @@
 import { Metadata } from 'next';
-import Link from 'next/link';
-import styles from './page.module.css';
+import { FundDetailView } from '@/components/FundDetail/FundDetailView';
 
 interface FundDetailPageProps {
     params: Promise<{
         fundId: string;
+    }>;
+    searchParams: Promise<{
+        from?: string;
     }>;
 }
 
@@ -20,18 +22,8 @@ export default async function FundDetailPage({ params }: FundDetailPageProps) {
     const { fundId } = await params;
 
     return (
-        <main className={styles.container}>
-            <Link href="/funds" className={styles.backLink}>
-                ← Back to Catalog
-            </Link>
-
-            <div className={styles.placeholder}>
-                <h1 className={styles.title}>Fund Details</h1>
-                <p className={styles.fundId}>{fundId}</p>
-                <p className={styles.message}>
-                    Full fund details will be available in US4.
-                </p>
-            </div>
+        <main>
+            <FundDetailView fundId={fundId} />
         </main>
     );
 }

@@ -54,3 +54,23 @@ class CursorData(BaseModel):
     
     n: str = Field(..., description="Last fund name")
     i: str = Field(..., description="Last fund ID")
+
+
+class FundDetail(BaseModel):
+    """Detailed fund information for detail view."""
+    
+    fund_id: str = Field(..., description="Unique fund identifier (proj_id)")
+    fund_name: str = Field(..., description="Fund name in English")
+    fund_abbr: str | None = Field(None, description="Fund abbreviation")
+    category: str | None = Field(None, description="Fund category/type")
+    amc_id: str = Field(..., description="Asset Management Company ID")
+    amc_name: str = Field(..., description="Asset Management Company name")
+    risk_level: str | None = Field(None, description="Risk level (1-8 or descriptive)")
+    expense_ratio: float | None = Field(None, description="Annual expense ratio percentage (rounded to 3 decimals)")
+    as_of_date: str | None = Field(None, description="Data snapshot date (ISO format)")
+    last_updated_at: str | None = Field(None, description="Last update timestamp (ISO format)")
+    data_source: str | None = Field(None, description="Data source identifier")
+    data_version: str | None = Field(None, description="Data version identifier")
+    
+    class Config:
+        from_attributes = True

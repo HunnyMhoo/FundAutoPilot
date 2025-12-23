@@ -199,3 +199,131 @@ class TestRootEndpoint:
         data = response.json()
         assert "message" in data
         assert "version" in data
+
+
+class TestGetFundById:
+    """Tests for GET /funds/{fund_id} endpoint."""
+    
+    @pytest.mark.asyncio
+    async def test_get_fund_by_id_success(self, client, mock_fund_service):
+        """Test successful fund detail retrieval."""
+        from app.models.fund import FundDetail
+        
+        mock_fund = FundDetail(
+            fund_id="M0001_2024",
+            fund_name="Test Fund A",
+            fund_abbr="TFA",
+            category="Equity",
+            amc_id="AMC001",
+            amc_name="Test AMC",
+            risk_level="5",
+            expense_ratio=1.234,
+            as_of_date="2024-12-23",
+            last_updated_at="2024-12-23T10:00:00",
+            data_source=None,
+            data_version="20241223100000",
+        )
+        
+        mock_service_instance = AsyncMock()
+        mock_service_instance.get_fund_by_id.return_value = mock_fund
+        mock_fund_service.return_value = mock_service_instance
+        
+        response = await client.get("/funds/M0001_2024")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["fund_id"] == "M0001_2024"
+        assert data["fund_name"] == "Test Fund A"
+        assert data["amc_name"] == "Test AMC"
+        assert data["expense_ratio"] == 1.234  # Should be rounded to 3 decimals
+        assert "as_of_date" in data or "last_updated_at" in data  # At least one freshness field
+    
+    @pytest.mark.asyncio
+    async def test_get_fund_by_id_not_found(self, client, mock_fund_service):
+        """Test 404 when fund not found."""
+        mock_service_instance = AsyncMock()
+        mock_service_instance.get_fund_by_id.side_effect = ValueError("Fund not found: M9999_2024")
+        mock_fund_service.return_value = mock_service_instance
+        
+        response = await client.get("/funds/M9999_2024")
+        
+        assert response.status_code == 404
+        data = response.json()
+        assert "not found" in data["detail"].lower()
+    
+    @pytest.mark.asyncio
+    async def test_get_fund_by_id_invalid_empty(self, client, mock_fund_service):
+        """Test 400 for empty fund_id."""
+        # FastAPI path validation should catch this, but test the endpoint logic
+        mock_service_instance = AsyncMock()
+        mock_service_instance.get_fund_by_id.side_effect = ValueError("fund_id cannot be empty")
+        mock_fund_service.return_value = mock_service_instance
+        
+        # Note: FastAPI won't allow empty path param, but we test with whitespace
+        response = await client.get("/funds/   ")
+        
+        # Should be 400 or handled by FastAPI validation
+        assert response.status_code in [400, 404]  # FastAPI might return 404 for invalid path
+    
+    @pytest.mark.asyncio
+    async def test_get_fund_by_id_expense_ratio_rounding(self, client, mock_fund_service):
+        """Test expense_ratio is rounded to 3 decimals."""
+        from app.models.fund import FundDetail
+        
+        mock_fund = FundDetail(
+            fund_id="M0002_2024",
+            fund_name="Test Fund B",
+            fund_abbr=None,
+            category="Bond",
+            amc_id="AMC002",
+            amc_name="Test AMC 2",
+            risk_level=None,
+            expense_ratio=1.234567,  # Should be rounded to 1.235
+            as_of_date="2024-12-23",
+            last_updated_at="2024-12-23T10:00:00",
+            data_source=None,
+            data_version=None,
+        )
+        
+        mock_service_instance = AsyncMock()
+        mock_service_instance.get_fund_by_id.return_value = mock_fund
+        mock_fund_service.return_value = mock_service_instance
+        
+        response = await client.get("/funds/M0002_2024")
+        
+        assert response.status_code == 200
+        data = response.json()
+        # Verify rounding to 3 decimals
+        assert data["expense_ratio"] == 1.235
+    
+    @pytest.mark.asyncio
+    async def test_get_fund_by_id_nullable_fields(self, client, mock_fund_service):
+        """Test that nullable fields are handled correctly."""
+        from app.models.fund import FundDetail
+        
+        mock_fund = FundDetail(
+            fund_id="M0003_2024",
+            fund_name="Test Fund C",
+            fund_abbr=None,
+            category="Mixed",
+            amc_id="AMC003",
+            amc_name="Test AMC 3",
+            risk_level=None,
+            expense_ratio=None,
+            as_of_date="2024-12-23",
+            last_updated_at="2024-12-23T10:00:00",
+            data_source=None,
+            data_version=None,
+        )
+        
+        mock_service_instance = AsyncMock()
+        mock_service_instance.get_fund_by_id.return_value = mock_fund
+        mock_fund_service.return_value = mock_service_instance
+        
+        response = await client.get("/funds/M0003_2024")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["risk_level"] is None
+        assert data["expense_ratio"] is None
+        assert data["fund_abbr"] is None

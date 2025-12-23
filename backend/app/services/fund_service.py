@@ -365,6 +365,85 @@ class FundService:
         except Exception:
             return None
     
+    async def get_fund_by_id(self, fund_id: str):
+        """
+        Get detailed fund information by fund_id.
+        
+        Args:
+            fund_id: Unique fund identifier (proj_id)
+            
+        Returns:
+            FundDetail object with fund information
+            
+        Raises:
+            ValueError: If fund_id is invalid or fund not found
+        """
+        from app.models.fund import FundDetail
+        
+        # Basic validation: fund_id must be non-empty
+        if not fund_id or not fund_id.strip():
+            raise ValueError("fund_id cannot be empty")
+        
+        # Query fund with AMC relationship
+        query = (
+            select(Fund)
+            .join(AMC, Fund.amc_id == AMC.unique_id)
+            .options(selectinload(Fund.amc))
+            .where(Fund.proj_id == fund_id.strip())
+        )
+        
+        result = await self.db.execute(query)
+        fund = result.scalar_one_or_none()
+        
+        if fund is None:
+            raise ValueError(f"Fund not found: {fund_id}")
+        
+        # Get AMC name
+        amc_name = "Unknown"
+        if fund.amc:
+            amc_name = fund.amc.name_en
+        else:
+            # Fallback: query AMC directly
+            amc_res = await self.db.execute(select(AMC).where(AMC.unique_id == fund.amc_id))
+            amc_obj = amc_res.scalar_one_or_none()
+            if amc_obj:
+                amc_name = amc_obj.name_en
+        
+        # Format expense_ratio to 3 decimals if present
+        expense_ratio = None
+        if fund.expense_ratio is not None:
+            expense_ratio = round(float(fund.expense_ratio), 3)
+        
+        # Format dates
+        as_of_date = None
+        if fund.last_upd_date:
+            as_of_date = fund.last_upd_date.strftime("%Y-%m-%d")
+        
+        last_updated_at = None
+        if fund.last_upd_date:
+            last_updated_at = fund.last_upd_date.isoformat()
+        
+        # Ensure at least one freshness field is present
+        if not as_of_date and not last_updated_at:
+            # Fallback to current date if no date available
+            as_of_date = datetime.now().strftime("%Y-%m-%d")
+            last_updated_at = datetime.now().isoformat()
+        
+        return FundDetail(
+            fund_id=fund.proj_id,
+            fund_name=fund.fund_name_en,
+            fund_abbr=fund.fund_abbr,
+            category=fund.category,
+            amc_id=fund.amc_id,
+            amc_name=amc_name,
+            risk_level=fund.risk_level,
+            expense_ratio=expense_ratio,
+            as_of_date=as_of_date,
+            last_updated_at=last_updated_at,
+            data_source=None,  # Not in current schema, can be added later
+            data_version=fund.data_snapshot_id,
+        )
+    
     @staticmethod
     def _calculate_fee_band(expense_ratio: Decimal | None) -> str | None:
         """
