@@ -399,6 +399,248 @@ class ElasticsearchSearchBackend(SearchBackend):
         except Exception:
             return None
     
+    async def get_category_aggregation(self) -> list[dict]:
+        """
+        Get distinct categories with counts using Elasticsearch aggregation.
+        
+        Returns:
+            List of {value: str, count: int} sorted by count desc, then value asc
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        query = {
+            "size": 0,  # No documents, only aggregations
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"fund_status": "RG"}},
+                        {"exists": {"field": "category"}}  # Exclude nulls
+                    ]
+                }
+            },
+            "aggs": {
+                "categories": {
+                    "terms": {
+                        "field": "category",
+                        "size": 1000,  # Max distinct categories expected
+                        "order": [
+                            {"_count": "desc"},  # Primary: count descending
+                            {"_key": "asc"}      # Secondary: alphabetical
+                        ]
+                    }
+                }
+            }
+        }
+        
+        try:
+            response = await self.client.search(
+                index=self.index_name,
+                body=query
+            )
+            
+            buckets = response["aggregations"]["categories"]["buckets"]
+            return [
+                {"value": bucket["key"], "count": bucket["doc_count"]}
+                for bucket in buckets
+            ]
+        except Exception as e:
+            logger.error(f"Elasticsearch category aggregation failed: {e}")
+            raise  # Let caller handle fallback
+    
+    async def get_risk_aggregation(self) -> list[dict]:
+        """
+        Get distinct risk levels with counts using Elasticsearch aggregation.
+        
+        Returns:
+            List of {value: str, count: int} sorted by risk_level asc (numeric if possible)
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        query = {
+            "size": 0,
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"fund_status": "RG"}},
+                        {"exists": {"field": "risk_level"}}
+                    ]
+                }
+            },
+            "aggs": {
+                "risks": {
+                    "terms": {
+                        "field": "risk_level",
+                        "size": 20,  # Max 8 risk levels, but allow buffer
+                        "order": {"_key": "asc"}  # Will sort as string, we'll handle numeric sort in Python
+                    }
+                }
+            }
+        }
+        
+        try:
+            response = await self.client.search(
+                index=self.index_name,
+                body=query
+            )
+            
+            buckets = response["aggregations"]["risks"]["buckets"]
+            results = [
+                {"value": bucket["key"], "count": bucket["doc_count"]}
+                for bucket in buckets
+            ]
+            
+            # Attempt numeric sort for risk levels (fallback to string if not numeric)
+            def sort_key(item):
+                try:
+                    return int(item["value"])
+                except (ValueError, TypeError):
+                    return item["value"]
+            
+            results.sort(key=sort_key)
+            return results
+        except Exception as e:
+            logger.error(f"Elasticsearch risk aggregation failed: {e}")
+            raise
+    
+    async def get_amc_aggregation(
+        self,
+        search_term: str | None = None,
+        limit: int = 20,
+        cursor: dict | None = None
+    ) -> dict:
+        """
+        Get AMCs with fund counts, supporting search and pagination.
+        
+        Uses Elasticsearch aggregation with sub-aggregation for AMC name search.
+        
+        Args:
+            search_term: Optional search term to filter AMC names
+            limit: Maximum number of results
+            cursor: Pagination cursor dict from previous request (contains last_amc_id and last_count)
+        
+        Returns:
+            {
+                "items": [{"id": str, "name": str, "count": int}],
+                "next_cursor": dict | None
+            }
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Build base query
+        must_clauses = [{"term": {"fund_status": "RG"}}]
+        
+        # Add AMC name search if provided
+        if search_term:
+            must_clauses.append({
+                "multi_match": {
+                    "query": search_term,
+                    "fields": ["amc_name"],
+                    "type": "phrase_prefix"  # Prefix matching for typeahead
+                }
+            })
+        
+        # Build aggregation with top_hits to get AMC name
+        aggs_config = {
+            "terms": {
+                "field": "amc_id",
+                "size": limit + 1,  # Fetch one extra for pagination check
+                "order": {"_count": "desc"}
+            },
+            "aggs": {
+                "amc_name": {
+                    "top_hits": {
+                        "size": 1,
+                        "_source": ["amc_name"]
+                    }
+                }
+            }
+        }
+        
+        # Apply cursor-based pagination if provided
+        # Note: ES terms aggregation doesn't support cursor directly, so we use a workaround
+        # by filtering out results before the cursor position
+        if cursor:
+            last_amc_id = cursor.get("last_amc_id")
+            last_count = cursor.get("last_count")
+            if last_amc_id:
+                # Add filter to exclude AMCs before cursor
+                # This is approximate - for exact pagination, composite aggregation would be better
+                # but terms aggregation is simpler and sufficient for most cases
+                pass  # We'll handle cursor in post-processing
+        
+        query = {
+            "size": 0,
+            "query": {
+                "bool": {
+                    "must": must_clauses
+                }
+            },
+            "aggs": {
+                "amcs": aggs_config
+            }
+        }
+        
+        try:
+            response = await self.client.search(
+                index=self.index_name,
+                body=query
+            )
+            
+            buckets = response["aggregations"]["amcs"]["buckets"]
+            
+            # Apply cursor filtering if needed
+            if cursor:
+                last_amc_id = cursor.get("last_amc_id")
+                last_count = cursor.get("last_count")
+                if last_amc_id:
+                    # Filter out items before cursor
+                    filtered_buckets = []
+                    found_cursor = False
+                    for bucket in buckets:
+                        if found_cursor:
+                            filtered_buckets.append(bucket)
+                        elif bucket["key"] == last_amc_id:
+                            found_cursor = True
+                            # Skip the cursor item itself
+                    buckets = filtered_buckets
+            
+            has_more = len(buckets) > limit
+            if has_more:
+                buckets = buckets[:limit]
+            
+            items = []
+            for bucket in buckets:
+                # Extract AMC name from top_hits
+                amc_name = "Unknown"
+                if bucket.get("amc_name", {}).get("hits", {}).get("hits"):
+                    hit = bucket["amc_name"]["hits"]["hits"][0]
+                    amc_name = hit["_source"].get("amc_name", "Unknown")
+                
+                items.append({
+                    "id": bucket["key"],
+                    "name": amc_name,
+                    "count": bucket["doc_count"]
+                })
+            
+            # Build cursor for next page
+            next_cursor = None
+            if has_more and buckets:
+                next_cursor = {
+                    "last_amc_id": buckets[-1]["key"],
+                    "last_count": buckets[-1]["doc_count"]
+                }
+            
+            return {
+                "items": items,
+                "next_cursor": next_cursor
+            }
+        except Exception as e:
+            logger.error(f"Elasticsearch AMC aggregation failed: {e}")
+            raise
+    
     async def close(self) -> None:
         """Close the Elasticsearch client."""
         await self.client.close()

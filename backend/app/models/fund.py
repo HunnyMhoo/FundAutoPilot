@@ -74,3 +74,42 @@ class FundDetail(BaseModel):
     
     class Config:
         from_attributes = True
+
+
+# Filter metadata models for US-N3
+class CategoryItem(BaseModel):
+    """Category filter option with count."""
+    value: str = Field(..., description="Category name")
+    count: int = Field(..., description="Number of funds in this category")
+
+
+class RiskItem(BaseModel):
+    """Risk level filter option with count."""
+    value: str = Field(..., description="Risk level (1-8 or descriptive)")
+    count: int = Field(..., description="Number of funds with this risk level")
+
+
+class AMCItem(BaseModel):
+    """AMC filter option with count."""
+    id: str = Field(..., description="AMC unique identifier")
+    name: str = Field(..., description="AMC name")
+    count: int = Field(..., description="Number of funds from this AMC")
+
+
+class CategoryListResponse(BaseModel):
+    """Response for category filter metadata."""
+    items: list[CategoryItem] = Field(..., description="List of categories with counts")
+
+
+class RiskListResponse(BaseModel):
+    """Response for risk level filter metadata."""
+    items: list[RiskItem] = Field(..., description="List of risk levels with counts")
+
+
+class AMCListResponse(BaseModel):
+    """Response for AMC filter metadata with pagination."""
+    items: list[AMCItem] = Field(..., description="List of AMCs with counts")
+    next_cursor: str | None = Field(
+        None,
+        description="Cursor for next page, null if end of results"
+    )

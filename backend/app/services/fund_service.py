@@ -185,7 +185,19 @@ class FundService:
             query = query.where(Fund.category.in_(filters["category"]))
 
         if filters.get("risk"):
-            query = query.where(Fund.risk_level.in_(filters["risk"]))
+            # Support both integer and string risk levels for backward compatibility
+            risk_values = filters["risk"]
+            risk_conditions = []
+            for risk_val in risk_values:
+                try:
+                    # Try integer first (preferred)
+                    risk_int = int(risk_val)
+                    risk_conditions.append(Fund.risk_level_int == risk_int)
+                except (ValueError, TypeError):
+                    # Fallback to string matching
+                    risk_conditions.append(Fund.risk_level == risk_val)
+            if risk_conditions:
+                query = query.where(or_(*risk_conditions))
 
         # Fee Band (Derived)
         fee_bands = filters.get("fee_band")
@@ -219,12 +231,14 @@ class FundService:
             primary_col = Fund.expense_ratio
             is_desc = True
         elif sort == "risk_asc":
-            query = query.order_by(Fund.risk_level.asc().nullslast(), Fund.proj_id.asc())
-            primary_col = Fund.risk_level
+            # Use risk_level_int for proper numeric sorting
+            query = query.order_by(Fund.risk_level_int.asc().nullslast(), Fund.proj_id.asc())
+            primary_col = Fund.risk_level_int
             is_desc = False
         elif sort == "risk_desc":
-            query = query.order_by(Fund.risk_level.desc().nullslast(), Fund.proj_id.asc())
-            primary_col = Fund.risk_level
+            # Use risk_level_int for proper numeric sorting
+            query = query.order_by(Fund.risk_level_int.desc().nullslast(), Fund.proj_id.asc())
+            primary_col = Fund.risk_level_int
             is_desc = True
         else:
             query = query.order_by(Fund.fund_name_en.asc(), Fund.proj_id.asc())
@@ -292,6 +306,8 @@ class FundService:
             val = None
             if primary_col == Fund.expense_ratio:
                 val = float(last_fund.expense_ratio) if last_fund.expense_ratio is not None else None
+            elif primary_col == Fund.risk_level_int:
+                val = last_fund.risk_level_int
             elif primary_col == Fund.risk_level:
                 val = last_fund.risk_level
             elif primary_col == Fund.fund_name_en:
@@ -322,9 +338,83 @@ class FundService:
         )
         return result.scalar() or 0
 
-    async def get_amcs_with_fund_counts(self) -> list[dict]:
-        """Get list of AMCs with their active fund counts, sorted by count descending."""
-        # Query to get AMC info with fund counts
+    async def get_amcs_with_fund_counts(
+        self,
+        search_term: str | None = None,
+        limit: int = 20,
+        cursor: str | None = None
+    ) -> dict:
+        """
+        Get list of AMCs with their active fund counts, supporting search and pagination.
+        
+        Uses Elasticsearch aggregation if available, otherwise falls back to SQL.
+        
+        Args:
+            search_term: Optional search term to filter AMC names
+            limit: Maximum number of results (default 20, max 100)
+            cursor: Base64-encoded cursor for pagination
+        
+        Returns:
+            {
+                "items": [{"id": str, "name": str, "count": int}],
+                "next_cursor": str | None
+            }
+        """
+        # Clamp limit
+        limit = min(max(1, limit), 100)
+        
+        # Decode cursor if provided
+        cursor_dict = None
+        if cursor:
+            cursor_dict = self._decode_amc_cursor(cursor)
+        
+        # Try Elasticsearch first if available
+        if self.search_backend:
+            try:
+                # Check if ES index is populated
+                from elasticsearch.exceptions import NotFoundError
+                try:
+                    stats = await self.search_backend.client.indices.stats(
+                        index=self.search_backend.index_name
+                    )
+                    doc_count = stats["indices"][self.search_backend.index_name]["total"]["docs"]["count"]
+                except (NotFoundError, KeyError):
+                    doc_count = 0
+                
+                if doc_count > 0:
+                    # Use ES aggregation
+                    result = await self.search_backend.get_amc_aggregation(
+                        search_term=search_term,
+                        limit=limit,
+                        cursor=cursor_dict
+                    )
+                    if result and result.get("items"):
+                        # Encode cursor for response
+                        next_cursor = None
+                        if result.get("next_cursor"):
+                            next_cursor = self._encode_amc_cursor(result["next_cursor"])
+                        return {
+                            "items": result["items"],
+                            "next_cursor": next_cursor
+                        }
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Elasticsearch AMC aggregation failed, falling back to SQL: {e}")
+        
+        # Fallback to SQL
+        return await self._get_amcs_with_fund_counts_sql(search_term, limit, cursor_dict)
+    
+    async def _get_amcs_with_fund_counts_sql(
+        self,
+        search_term: str | None = None,
+        limit: int = 20,
+        cursor_dict: dict | None = None
+    ) -> dict:
+        """SQL fallback for AMC aggregation with search and pagination."""
+        from sqlalchemy import or_, and_
+        
+        # Base query
         query = (
             select(
                 AMC.unique_id,
@@ -335,21 +425,216 @@ class FundService:
             .join(Fund, AMC.unique_id == Fund.amc_id)
             .where(Fund.fund_status == "RG")
             .group_by(AMC.unique_id, AMC.name_en, AMC.name_th)
-            .order_by(func.count(Fund.proj_id).desc())
+        )
+        
+        # Add search filter if provided
+        if search_term:
+            search_lower = search_term.lower().strip()
+            query = query.where(
+                or_(
+                    AMC.name_en.ilike(f"%{search_lower}%"),
+                    AMC.name_th.ilike(f"%{search_lower}%")
+                )
+            )
+        
+        # Apply cursor-based pagination
+        if cursor_dict:
+            last_amc_id = cursor_dict.get("last_amc_id")
+            last_count = cursor_dict.get("last_count")
+            if last_amc_id:
+                # Filter: count > last_count OR (count == last_count AND amc_id > last_amc_id)
+                query = query.having(
+                    or_(
+                        func.count(Fund.proj_id) < last_count,
+                        and_(
+                            func.count(Fund.proj_id) == last_count,
+                            AMC.unique_id > last_amc_id
+                        )
+                    )
+                )
+        
+        # Order by count descending, then by AMC ID for deterministic ordering
+        query = query.order_by(
+            func.count(Fund.proj_id).desc(),
+            AMC.unique_id.asc()
+        )
+        
+        # Fetch limit + 1 to check for next page
+        query = query.limit(limit + 1)
+        
+        result = await self.db.execute(query)
+        rows = result.all()
+        
+        has_more = len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+        
+        items = [
+            {
+                "id": row.unique_id,
+                "name": row.name_en or row.name_th or "Unknown",
+                "count": row.fund_count
+            }
+            for row in rows
+        ]
+        
+        # Build next cursor
+        next_cursor = None
+        if has_more and rows:
+            last_row = rows[-1]
+            cursor_data = {
+                "last_amc_id": last_row.unique_id,
+                "last_count": last_row.fund_count
+            }
+            next_cursor = self._encode_amc_cursor(cursor_data)
+        
+        return {
+            "items": items,
+            "next_cursor": next_cursor
+        }
+    
+    async def get_categories_with_counts(self) -> list[dict]:
+        """
+        Get distinct categories with counts.
+        
+        Uses Elasticsearch aggregation if available, otherwise falls back to SQL.
+        
+        Returns:
+            List of {value: str, count: int} sorted by count desc, then value asc
+        """
+        # Try Elasticsearch first if available
+        if self.search_backend:
+            try:
+                # Check if ES index is populated
+                from elasticsearch.exceptions import NotFoundError
+                try:
+                    stats = await self.search_backend.client.indices.stats(
+                        index=self.search_backend.index_name
+                    )
+                    doc_count = stats["indices"][self.search_backend.index_name]["total"]["docs"]["count"]
+                except (NotFoundError, KeyError):
+                    doc_count = 0
+                
+                if doc_count > 0:
+                    # Use ES aggregation
+                    result = await self.search_backend.get_category_aggregation()
+                    if result:
+                        return result
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Elasticsearch category aggregation failed, falling back to SQL: {e}")
+        
+        # Fallback to SQL
+        return await self._get_categories_with_counts_sql()
+    
+    async def _get_categories_with_counts_sql(self) -> list[dict]:
+        """SQL fallback for category aggregation."""
+        query = (
+            select(
+                Fund.category,
+                func.count(Fund.proj_id).label("count")
+            )
+            .where(
+                and_(
+                    Fund.fund_status == "RG",
+                    Fund.category.isnot(None)
+                )
+            )
+            .group_by(Fund.category)
+            .order_by(func.count(Fund.proj_id).desc(), Fund.category.asc())
         )
         
         result = await self.db.execute(query)
         rows = result.all()
         
         return [
-            {
-                "id": row.unique_id,
-                "name_en": row.name_en,
-                "name_th": row.name_th,
-                "fund_count": row.fund_count
-            }
+            {"value": row.category, "count": row.count}
             for row in rows
         ]
+    
+    async def get_risks_with_counts(self) -> list[dict]:
+        """
+        Get distinct risk levels with counts.
+        
+        Uses Elasticsearch aggregation if available, otherwise falls back to SQL.
+        
+        Returns:
+            List of {value: str, count: int} sorted by risk_level asc (numeric if possible)
+        """
+        # Try Elasticsearch first if available
+        if self.search_backend:
+            try:
+                # Check if ES index is populated
+                from elasticsearch.exceptions import NotFoundError
+                try:
+                    stats = await self.search_backend.client.indices.stats(
+                        index=self.search_backend.index_name
+                    )
+                    doc_count = stats["indices"][self.search_backend.index_name]["total"]["docs"]["count"]
+                except (NotFoundError, KeyError):
+                    doc_count = 0
+                
+                if doc_count > 0:
+                    # Use ES aggregation
+                    result = await self.search_backend.get_risk_aggregation()
+                    if result:
+                        return result
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Elasticsearch risk aggregation failed, falling back to SQL: {e}")
+        
+        # Fallback to SQL
+        return await self._get_risks_with_counts_sql()
+    
+    async def _get_risks_with_counts_sql(self) -> list[dict]:
+        """SQL fallback for risk aggregation."""
+        query = (
+            select(
+                Fund.risk_level,
+                func.count(Fund.proj_id).label("count")
+            )
+            .where(
+                and_(
+                    Fund.fund_status == "RG",
+                    Fund.risk_level.isnot(None)
+                )
+            )
+            .group_by(Fund.risk_level)
+            .order_by(Fund.risk_level.asc())
+        )
+        
+        result = await self.db.execute(query)
+        rows = result.all()
+        
+        results = [
+            {"value": row.risk_level, "count": row.count}
+            for row in rows
+        ]
+        
+        # Attempt numeric sort for risk levels (fallback to string if not numeric)
+        def sort_key(item):
+            try:
+                return int(item["value"])
+            except (ValueError, TypeError):
+                return item["value"]
+        
+        results.sort(key=sort_key)
+        return results
+    
+    def _encode_amc_cursor(self, cursor_data: dict) -> str:
+        """Encode AMC pagination cursor to base64 string."""
+        json_str = json.dumps(cursor_data, ensure_ascii=False)
+        return base64.urlsafe_b64encode(json_str.encode()).decode()
+    
+    def _decode_amc_cursor(self, cursor: str) -> dict | None:
+        """Decode AMC pagination cursor from base64 string."""
+        try:
+            json_str = base64.urlsafe_b64decode(cursor.encode()).decode()
+            return json.loads(json_str)
+        except Exception:
+            return None
 
     def _encode_cursor(self, val: any, fund_id: str) -> str:
         """Encode cursor data to base64 string."""

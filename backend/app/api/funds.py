@@ -4,7 +4,13 @@ from fastapi import APIRouter, Depends, Query, HTTPException, Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.models.fund import FundListResponse, FundDetail
+from app.models.fund import (
+    FundListResponse, 
+    FundDetail,
+    CategoryListResponse,
+    RiskListResponse,
+    AMCListResponse
+)
 from app.services.fund_service import FundService
 
 router = APIRouter(prefix="/funds", tags=["funds"])
@@ -54,14 +60,68 @@ async def get_fund_count(
     return {"count": count}
 
 
-@router.get("/amcs")
-async def get_amcs(
+@router.get("/categories", response_model=CategoryListResponse)
+async def get_categories(
     db: AsyncSession = Depends(get_db),
-) -> list[dict]:
-    """Get list of AMCs with active fund counts."""
-    service = FundService(db)
-    amcs = await service.get_amcs_with_fund_counts()
-    return amcs
+) -> CategoryListResponse:
+    """
+    Get distinct categories with fund counts.
+    
+    Returns dataset-driven category options excluding null values,
+    ordered by count descending, then alphabetically.
+    """
+    try:
+        service = FundService(db)
+        categories = await service.get_categories_with_counts()
+        return CategoryListResponse(items=categories)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch categories: {str(e)}")
+
+
+@router.get("/risks", response_model=RiskListResponse)
+async def get_risks(
+    db: AsyncSession = Depends(get_db),
+) -> RiskListResponse:
+    """
+    Get distinct risk levels with fund counts.
+    
+    Returns dataset-driven risk level options excluding null values,
+    ordered by risk level ascending (numeric if applicable).
+    """
+    try:
+        service = FundService(db)
+        risks = await service.get_risks_with_counts()
+        return RiskListResponse(items=risks)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch risks: {str(e)}")
+
+
+@router.get("/amcs", response_model=AMCListResponse)
+async def get_amcs(
+    q: str | None = Query(None, description="Search term for AMC name (typeahead)"),
+    limit: int = Query(20, ge=1, le=100, description="Maximum number of results"),
+    cursor: str | None = Query(None, description="Pagination cursor for next page"),
+    db: AsyncSession = Depends(get_db),
+) -> AMCListResponse:
+    """
+    Get list of AMCs with active fund counts, supporting search and pagination.
+    
+    Supports typeahead search on AMC names and cursor-based pagination
+    for full coverage beyond top 10 AMCs.
+    """
+    try:
+        service = FundService(db)
+        result = await service.get_amcs_with_fund_counts(
+            search_term=q,
+            limit=limit,
+            cursor=cursor
+        )
+        return AMCListResponse(
+            items=result["items"],
+            next_cursor=result.get("next_cursor")
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch AMCs: {str(e)}")
 
 
 @router.get("/{fund_id}", response_model=FundDetail)

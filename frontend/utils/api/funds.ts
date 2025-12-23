@@ -97,3 +97,88 @@ export async function fetchFundDetail(fundId: string): Promise<FundDetail> {
 
     return response.json();
 }
+
+// Filter metadata types
+export interface CategoryItem {
+    value: string;
+    count: number;
+}
+
+export interface RiskItem {
+    value: string;
+    count: number;
+}
+
+export interface AMCItem {
+    id: string;
+    name: string;
+    count: number;
+}
+
+export interface CategoryListResponse {
+    items: CategoryItem[];
+}
+
+export interface RiskListResponse {
+    items: RiskItem[];
+}
+
+export interface AMCListResponse {
+    items: AMCItem[];
+    next_cursor: string | null;
+}
+
+// Filter metadata API functions
+export async function fetchCategories(): Promise<CategoryListResponse> {
+    const response = await fetch(`${API_BASE_URL}/funds/categories`, {
+        method: 'GET',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+    });
+
+    if (!response.ok) {
+        throw new Error(`Failed to fetch categories: ${response.status} ${response.statusText}`);
+    }
+
+    return response.json();
+}
+
+export async function fetchRisks(): Promise<RiskListResponse> {
+    const response = await fetch(`${API_BASE_URL}/funds/risks`, {
+        method: 'GET',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+    });
+
+    if (!response.ok) {
+        throw new Error(`Failed to fetch risks: ${response.status} ${response.statusText}`);
+    }
+
+    return response.json();
+}
+
+export async function fetchAMCs(
+    searchTerm?: string,
+    limit: number = 20,
+    cursor?: string | null
+): Promise<AMCListResponse> {
+    const params = new URLSearchParams();
+    params.set('limit', limit.toString());
+    if (searchTerm) params.set('q', searchTerm);
+    if (cursor) params.set('cursor', cursor);
+
+    const response = await fetch(`${API_BASE_URL}/funds/amcs?${params.toString()}`, {
+        method: 'GET',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+    });
+
+    if (!response.ok) {
+        throw new Error(`Failed to fetch AMCs: ${response.status} ${response.statusText}`);
+    }
+
+    return response.json();
+}

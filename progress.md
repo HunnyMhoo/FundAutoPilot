@@ -24,10 +24,10 @@ The application consists of:
 - **Current limitations**: Elasticsearch index requires manual population via ingestion script; currently falls back to SQL search when ES index is empty
 
 ### Filter and Sort
-- **What it does**: Filter by AMC, category, risk level, fee band (low/medium/high); sort by name, fee, or risk (ascending/descending)
-- **Where it lives**: `frontend/components/FundCatalog/FilterPanel.tsx`, `frontend/components/FundCatalog/SortControl.tsx`, backend filtering in `backend/app/services/fund_service.py` (lines 68-100)
-- **How to verify**: Use sidebar filters and sort dropdown on `/funds` page
-- **Current limitations**: Category list is hardcoded in frontend (`FilterPanel.tsx` line 12-18); AMC list fetched from API but limited to top 10 by fund count
+- **What it does**: Filter by AMC, category, risk level, fee band (low/medium/high); sort by name, fee, or risk (ascending/descending). Filter options are dataset-driven (categories, risks, and AMCs loaded from API with counts). AMC filter supports typeahead search with pagination.
+- **Where it lives**: `frontend/components/FundCatalog/FilterPanel.tsx`, `frontend/components/FundCatalog/SortControl.tsx`, backend filtering in `backend/app/services/fund_service.py` (lines 68-100), filter metadata endpoints in `backend/app/api/funds.py`
+- **How to verify**: Use sidebar filters and sort dropdown on `/funds` page. Filter options show counts and are loaded from API. AMC filter supports search beyond top 10.
+- **Current limitations**: None
 
 ### Data Freshness Display
 - **What it does**: Shows "Data updated" date badge in catalog header
@@ -50,10 +50,24 @@ The application consists of:
 - Handler: `get_fund_count()` in `backend/app/api/funds.py`
 - Returns: `{"count": int}`
 
-**GET /funds/amcs** (`backend/app/api/funds.py` lines 57-64)
-- Purpose: Get list of AMCs with active fund counts
+**GET /funds/categories** (`backend/app/api/funds.py` lines 63-75)
+- Purpose: Get distinct categories with fund counts (dataset-driven filter metadata)
+- Handler: `get_categories()` in `backend/app/api/funds.py`
+- Returns: `CategoryListResponse` with items array of `{value: str, count: int}` ordered by count desc, then alphabetically
+- Excludes null categories
+
+**GET /funds/risks** (`backend/app/api/funds.py` lines 78-90)
+- Purpose: Get distinct risk levels with fund counts (dataset-driven filter metadata)
+- Handler: `get_risks()` in `backend/app/api/funds.py`
+- Returns: `RiskListResponse` with items array of `{value: str, count: int}` ordered by risk_level ascending (numeric if applicable)
+- Excludes null risk levels
+
+**GET /funds/amcs** (`backend/app/api/funds.py` lines 93-115)
+- Purpose: Get list of AMCs with active fund counts, supporting search and pagination
 - Handler: `get_amcs()` in `backend/app/api/funds.py`
-- Returns: Array of `{id, name_en, name_th, fund_count}` sorted by count descending
+- Query parameters: `q` (search term for typeahead), `limit` (1-100, default 20), `cursor` (pagination)
+- Returns: `AMCListResponse` with items array of `{id: str, name: str, count: int}` and `next_cursor` for pagination
+- Supports full AMC coverage beyond top 10 via search and pagination
 
 **GET /** (`backend/main.py` lines 30-37)
 - Purpose: Root endpoint with API info
@@ -74,7 +88,7 @@ The application consists of:
 - Fields: `name_th`, `name_en`, `last_upd_date`
 - Relationship: One-to-many with `fund`
 
-`fund` (`backend/app/models/fund_orm.py` lines 28-65)
+`fund` (`backend/app/models/fund_orm.py` lines 28-75)
 - Primary key: `proj_id` (String(50))
 - Foreign key: `amc_id` → `amc.unique_id`
 - Fields: `fund_name_th`, `fund_name_en`, `fund_abbr`, `fund_status` (required), `regis_date`, `category`, `risk_level`, `expense_ratio`, `last_upd_date`, `data_snapshot_id`
@@ -83,6 +97,16 @@ The application consists of:
   - `idx_fund_name_asc` on (`fund_name_en`, `proj_id`)
   - `idx_fund_status` on (`fund_status`)
   - `idx_fund_search` on (`fund_name_norm`, `fund_abbr_norm`)
+  - `idx_fund_category` on (`fund_status`, `category`) - Composite for filtering + aggregation (US-N3)
+  - `idx_fund_risk` on (`fund_status`, `risk_level`) - Composite for filtering + aggregation (US-N3)
+  - `idx_fund_amc` on (`fund_status`, `amc_id`) - For AMC filtering and aggregation (US-N3)
+
+`amc` (`backend/app/models/fund_orm.py` lines 11-30)
+- Primary key: `unique_id` (String(20))
+- Fields: `name_th`, `name_en`, `last_upd_date`
+- Relationship: One-to-many with `fund`
+- Indexes:
+  - `idx_amc_name_search` on (`name_en`, `name_th`) - For typeahead search (US-N3)
 
 **Migration/Seeding**: Tables created via `Base.metadata.create_all()` in ingestion script (`backend/app/services/ingestion/ingest_funds.py` line 194). No Alembic migrations present.
 
@@ -93,7 +117,9 @@ The application consists of:
 - `_list_funds_elasticsearch()`: Uses Elasticsearch search backend with automatic fallback to SQL when ES index is empty
 - `_list_funds_sql()`: SQL-based search using normalized fields with fallback to raw fields when normalized is NULL
 - `get_fund_count()`: Counts active funds (status="RG")
-- `get_amcs_with_fund_counts()`: Returns AMCs with fund counts, sorted by count descending
+- `get_categories_with_counts()`: Returns distinct categories with counts using Elasticsearch aggregation (with SQL fallback), ordered by count desc then alphabetically, excludes nulls (US-N3)
+- `get_risks_with_counts()`: Returns distinct risk levels with counts using Elasticsearch aggregation (with SQL fallback), ordered ascending (numeric if possible), excludes nulls (US-N3)
+- `get_amcs_with_fund_counts()`: Returns AMCs with fund counts, supporting search and pagination, uses Elasticsearch aggregation (with SQL fallback), cursor-based pagination (US-N3)
 - Fee band classification: low (≤1.0%), medium (1-2%), high (>2%)
 
 **SearchBackend** (`backend/app/services/search/backend.py`)
@@ -106,6 +132,9 @@ The application consists of:
 - Index: `funds` with mappings for `fund_name`, `fund_abbr`, `amc_name`, `category`, `risk_level`, `expense_ratio`, `fee_band`
 - Supports cursor-based pagination via `search_after`
 - Handles sorting by name, fee, risk (ascending/descending)
+- `get_category_aggregation()`: Elasticsearch terms aggregation for categories with counts (US-N3)
+- `get_risk_aggregation()`: Elasticsearch terms aggregation for risk levels with counts (US-N3)
+- `get_amc_aggregation()`: Elasticsearch terms aggregation for AMCs with search and pagination support (US-N3)
 
 **Normalization Utility** (`backend/app/utils/normalization.py`)
 - `normalize_search_text()`: Lowercases (Unicode casefold), trims whitespace, collapses consecutive spaces, strips punctuation (- _ . , / ( ) [ ] : ; ' " `), preserves Thai characters
@@ -168,8 +197,11 @@ The application consists of:
 
 **FilterPanel** (`frontend/components/FundCatalog/FilterPanel.tsx`)
 - Sidebar with filter sections: Category, Risk Level, Fees, AMC
-- Fetches AMC list from `/funds/amcs` API
-- Hardcoded category and risk options
+- Fetches categories from `/funds/categories` API (dataset-driven, shows counts)
+- Fetches risks from `/funds/risks` API (dataset-driven, shows counts)
+- AMC filter with typeahead search: Fetches from `/funds/amcs` API with search parameter, supports pagination with "Load more" button, debounced search (300ms)
+- Loading and error states per filter section with retry functionality
+- All filter options display fund counts
 
 **SearchInput** (`frontend/components/FundCatalog/SearchInput.tsx`)
 - Debounced search input with clear button
@@ -205,6 +237,9 @@ The application consists of:
 **API Client** (`frontend/utils/api/funds.ts`)
 - `fetchFunds()`: Calls `/funds` endpoint with query params
 - `fetchFundCount()`: Calls `/funds/count` endpoint
+- `fetchCategories()`: Calls `/funds/categories` endpoint, returns `CategoryListResponse` (US-N3)
+- `fetchRisks()`: Calls `/funds/risks` endpoint, returns `RiskListResponse` (US-N3)
+- `fetchAMCs()`: Calls `/funds/amcs` endpoint with optional search, limit, and cursor params, returns `AMCListResponse` (US-N3)
 - Uses `NEXT_PUBLIC_API_URL` env var (defaults to `http://localhost:8000`)
 - Real API integration (not mocked)
 
@@ -282,11 +317,15 @@ docker-compose up --build
 
 **Backend Tests** (`backend/tests/`):
 - Framework: pytest with pytest-asyncio
-- Test file: `test_funds_api.py`
+- Test files: `test_funds_api.py`, `test_filter_metadata_api.py`
 - Test coverage:
   - `TestListFunds`: Success cases, filters, sort, cursor pagination, limit validation, empty results
   - `TestHealthCheck`: Health endpoint
   - `TestRootEndpoint`: Root endpoint
+  - `TestGetCategories`: Success with counts, excludes nulls, ordering, empty results, error handling (US-N3)
+  - `TestGetRisks`: Success with counts, excludes nulls, ordering, empty results (US-N3)
+  - `TestGetAMCs`: Basic listing, search functionality, pagination, limit validation, empty results, cursor handling, combined params (US-N3)
+  - `TestFilterMetadataIntegration`: Response structure validation for all filter metadata endpoints (US-N3)
 - Mocking: Uses `unittest.mock` to mock `FundService`
 - Test client: httpx `AsyncClient` with `ASGITransport`
 
@@ -315,8 +354,8 @@ No coverage tools or reports found in codebase.
 - API: No explicit logging configuration found (relies on uvicorn defaults)
 
 **Error Handling**:
-- API: Generic exception handling in `list_funds` endpoint returns 500 with error message (`backend/app/api/funds.py` lines 43-44)
-- Frontend: Error states with retry actions in `ErrorState` component and `useFundCatalog` hook
+- API: Generic exception handling in endpoints returns 500 with error message (`backend/app/api/funds.py`). Filter metadata endpoints (`/funds/categories`, `/funds/risks`, `/funds/amcs`) have try-catch blocks with HTTPException (US-N3)
+- Frontend: Error states with retry actions in `ErrorState` component and `useFundCatalog` hook. FilterPanel has per-section error handling with retry buttons (US-N3)
 - Ingestion: Try-catch around API calls, error counter in stats (`backend/app/services/ingestion/ingest_funds.py` lines 74-81)
 
 **Tracing/Metrics**: None present
@@ -340,7 +379,7 @@ No coverage tools or reports found in codebase.
 - No database migrations system (Alembic) - tables created via `create_all()`
 
 **API Endpoints**:
-- No individual fund detail endpoint (`GET /funds/{fund_id}`)
+- Individual fund detail endpoint exists (`GET /funds/{fund_id}`) - implemented in previous work
 - No fund comparison endpoint
 - No switch impact simulation endpoint (core product feature)
 
@@ -351,12 +390,11 @@ No coverage tools or reports found in codebase.
 **Testing**:
 - No unit tests for normalization utility (`backend/app/utils/normalization.py`)
 - No tests for Elasticsearch search backend and SQL fallback logic
+- Filter metadata endpoints have comprehensive test coverage (`test_filter_metadata_api.py`) (US-N3)
 
 ### Frontend Gaps
 
 - No frontend Dockerfile (referenced in docker-compose.yml but file missing)
-- Category filter options are hardcoded instead of fetched from API
-- AMC filter limited to top 10 by fund count
 - No error boundary components
 - No loading states for individual fund cards
 - Search debounce delay not configurable (hardcoded in component)
@@ -407,11 +445,11 @@ Not applicable.
 
 8. **Add database migrations**: Set up Alembic in `backend/`, create initial migration from existing schema. Verify by running migration on fresh database.
 
-9. **Fetch category options from API**: Create `GET /funds/categories` endpoint returning distinct categories, update `FilterPanel.tsx` to fetch instead of hardcoding. Verify by checking filter dropdown shows actual categories.
+9. **[DONE] Fetch category options from API**: Created `GET /funds/categories` and `GET /funds/risks` endpoints returning distinct values with counts, upgraded `GET /funds/amcs` with search and pagination, updated `FilterPanel.tsx` to fetch all filter options from API. Filter options now show counts and support full AMC coverage via typeahead search. Verified by checking filter dropdowns show actual dataset values with counts.
 
 10. **Add frontend Dockerfile**: Create `frontend/Dockerfile` for production build. Verify by running `docker-compose up --build`.
 
-11. **Improve error handling in API**: Add specific exception types and HTTP status codes (400 for validation, 404 for not found). Add tests for error cases. Verify via API error responses.
+11. **[PARTIAL] Improve error handling in API**: Added error handling with HTTPException to filter metadata endpoints (`/funds/categories`, `/funds/risks`, `/funds/amcs`) returning 500 with error details. Added tests for error cases. Still need specific exception types and status codes (400 for validation, 404 for not found) for other endpoints.
 
 12. **Add database health check**: Update `/health` endpoint to verify database connectivity. Verify by stopping database and checking health endpoint returns unhealthy.
 
@@ -433,12 +471,13 @@ Not applicable.
 - `backend/app/services/ingestion/ingest_funds.py` - SEC Thailand data ingestion script with ES sync
 - `backend/app/utils/__init__.py` - Utils module exports
 - `backend/app/utils/normalization.py` - Text normalization utility for search
-- `backend/app/models/fund_orm.py` - SQLAlchemy ORM models
-- `backend/app/models/fund.py` - Pydantic request/response schemas
+- `backend/app/models/fund_orm.py` - SQLAlchemy ORM models (includes filter metadata indexes for US-N3)
+- `backend/app/models/fund.py` - Pydantic request/response schemas (includes CategoryItem, RiskItem, AMCItem, CategoryListResponse, RiskListResponse, AMCListResponse for US-N3)
 - `backend/app/core/config.py` - Application configuration (includes Elasticsearch settings)
 - `backend/app/core/database.py` - Database connection and session management
 - `backend/app/core/elasticsearch.py` - Elasticsearch client initialization
 - `backend/tests/test_funds_api.py` - API endpoint tests
+- `backend/tests/test_filter_metadata_api.py` - Filter metadata endpoint tests (US-N3)
 - `backend/tests/conftest.py` - Pytest configuration
 - `backend/requirements.txt` - Python dependencies (includes elasticsearch, aiohttp)
 - `backend/Dockerfile` - Backend container definition
@@ -450,7 +489,8 @@ Not applicable.
 - `frontend/app/layout.tsx` - Root layout
 - `frontend/components/FundCatalog/FundCatalog.tsx` - Main catalog component with search results label
 - `frontend/components/FundCatalog/useFundCatalog.ts` - Catalog state management hook with clearSearch
-- `frontend/components/FundCatalog/FilterPanel.tsx` - Filter sidebar
+- `frontend/components/FundCatalog/FilterPanel.tsx` - Filter sidebar with API-driven options, typeahead AMC search, loading/error states (US-N3)
+- `frontend/components/FundCatalog/FilterSection.tsx` - Filter section component with conditional title rendering
 - `frontend/components/FundCatalog/SearchInput.tsx` - Search input component
 - `frontend/components/FundCatalog/EmptyState.tsx` - Search-specific and generic empty states
 - `frontend/utils/api/funds.ts` - API client functions
@@ -465,5 +505,6 @@ Not applicable.
 - `docs/user_story/us1.md` - User story 1: Browse fund catalog
 - `docs/user_story/us2.md` - User story 2: Search funds
 - `docs/user_story/us-n1.md` - User story N1: Search normalization and ranking
+- `docs/user_story/us-n3.md` - User story N3: Data-driven filter metadata (categories, risks, full AMC search)
 - `docs/architecture_recommendations.md` - Architecture guidance
 

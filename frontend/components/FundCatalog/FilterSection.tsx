@@ -10,9 +10,11 @@ interface FilterSectionProps {
 export function FilterSection({ title, items, selectedValues, onToggle }: FilterSectionProps) {
     return (
         <div className="mb-6">
-            <h3 className="text-sm font-semibold text-gray-900 uppercase tracking-wider mb-3">
-                {title}
-            </h3>
+            {title && (
+                <h3 className="text-sm font-semibold text-gray-900 uppercase tracking-wider mb-3">
+                    {title}
+                </h3>
+            )}
             <div className="space-y-2">
                 {items.map((item) => {
                     const isSelected = selectedValues.includes(item.value);
