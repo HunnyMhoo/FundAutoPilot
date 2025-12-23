@@ -1,0 +1,27 @@
+# Core dependencies
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+python-dotenv
+
+# Database
+sqlalchemy[asyncio]
+psycopg2-binary
+asyncpg
+
+# Data processing
+pandas
+numpy
+
+# HTTP client for ingestion
+requests
+
+# Testing
+pytest
+pytest-asyncio
+httpx
+
+# Development
+black
+ruff
