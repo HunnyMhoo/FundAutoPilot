@@ -52,3 +52,13 @@ async def get_fund_count(
     service = FundService(db)
     count = await service.get_fund_count()
     return {"count": count}
+
+
+@router.get("/amcs")
+async def get_amcs(
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """Get list of AMCs with active fund counts."""
+    service = FundService(db)
+    amcs = await service.get_amcs_with_fund_counts()
+    return amcs

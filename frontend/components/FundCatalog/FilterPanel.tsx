@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import { FilterSection } from './FilterSection';
 import { FundFilters } from '@/utils/api/funds';
 
@@ -33,16 +34,53 @@ const FEE_BANDS = [
     { label: 'High (> 2.0%)', value: 'high' },
 ];
 
-const TOP_AMCS = [
-    // Top 5-10 for MVP
-    { label: 'SCBAM', value: 'SCBAM' }, // Need actual IDs! Using Code for now based on typical usage
-    { label: 'KAsset', value: 'KAsset' },
-    { label: 'BBLAM', value: 'BBLAM' },
-    { label: 'Krungsri', value: 'Krungsri' },
-    { label: 'Kiatnakin', value: 'Kiatnakin' },
-];
+// Helper to extract short name from full AMC name
+function getAmcShortName(fullName: string): string {
+    // Extract common abbreviations from full names
+    if (fullName.includes('SCB ')) return 'SCBAM';
+    if (fullName.includes('KASIKORN')) return 'KAsset';
+    if (fullName.includes('BBL ')) return 'BBLAM';
+    if (fullName.includes('KRUNGSRI')) return 'Krungsri';
+    if (fullName.includes('KIATNAKIN')) return 'Kiatnakin';
+    if (fullName.includes('KRUNG THAI')) return 'KTAM';
+    if (fullName.includes('MFC ')) return 'MFC';
+    if (fullName.includes('TISCO')) return 'TISCO';
+    if (fullName.includes('UOB ')) return 'UOBAM';
+    if (fullName.includes('EASTSPRING')) return 'Eastspring';
+    
+    // Fallback: first word or first 10 chars
+    const firstWord = fullName.split(' ')[0];
+    return firstWord.length > 15 ? fullName.substring(0, 15) : firstWord;
+}
 
 export function FilterPanel({ filters, onToggle, className = '' }: FilterPanelProps) {
+    const [amcOptions, setAmcOptions] = useState<Array<{ label: string; value: string }>>([]);
+
+    useEffect(() => {
+        // Fetch AMC list from API
+        const fetchAmcs = async () => {
+            try {
+                const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+                const response = await fetch(`${API_BASE_URL}/funds/amcs`);
+                if (response.ok) {
+                    const amcs = await response.json();
+                    // Take top 10 AMCs by fund count and format for display
+                    const formatted = amcs.slice(0, 10).map((amc: any) => ({
+                        label: `${getAmcShortName(amc.name_en)} (${amc.fund_count})`,
+                        value: amc.id
+                    }));
+                    setAmcOptions(formatted);
+                }
+            } catch (error) {
+                console.error('Failed to fetch AMCs:', error);
+                // Fallback: use empty array, filters will still work if users know IDs
+                setAmcOptions([]);
+            }
+        };
+
+        fetchAmcs();
+    }, []);
+
     return (
         <aside className={`w-64 flex-shrink-0 border-r border-gray-100 pr-6 ${className}`}>
             <FilterSection
@@ -68,7 +106,7 @@ export function FilterPanel({ filters, onToggle, className = '' }: FilterPanelPr
 
             <FilterSection
                 title="AMC"
-                items={TOP_AMCS}
+                items={amcOptions}
                 selectedValues={filters.amc}
                 onToggle={(val) => onToggle('amc', val)}
             />

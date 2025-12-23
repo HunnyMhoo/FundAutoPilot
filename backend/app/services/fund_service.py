@@ -43,10 +43,11 @@ class FundService:
         limit = min(max(1, limit), 100)
         filters = filters or {}
 
-        # Base query
+        # Base query with eager loading
         query = (
             select(Fund)
             .join(AMC, Fund.amc_id == AMC.unique_id)
+            .options(selectinload(Fund.amc))
             .where(Fund.fund_status == "RG")
         )
 
@@ -301,6 +302,35 @@ class FundService:
             select(func.count(Fund.proj_id)).where(Fund.fund_status == "RG")
         )
         return result.scalar() or 0
+
+    async def get_amcs_with_fund_counts(self) -> list[dict]:
+        """Get list of AMCs with their active fund counts, sorted by count descending."""
+        # Query to get AMC info with fund counts
+        query = (
+            select(
+                AMC.unique_id,
+                AMC.name_en,
+                AMC.name_th,
+                func.count(Fund.proj_id).label("fund_count")
+            )
+            .join(Fund, AMC.unique_id == Fund.amc_id)
+            .where(Fund.fund_status == "RG")
+            .group_by(AMC.unique_id, AMC.name_en, AMC.name_th)
+            .order_by(func.count(Fund.proj_id).desc())
+        )
+        
+        result = await self.db.execute(query)
+        rows = result.all()
+        
+        return [
+            {
+                "id": row.unique_id,
+                "name_en": row.name_en,
+                "name_th": row.name_th,
+                "fund_count": row.fund_count
+            }
+            for row in rows
+        ]
 
     def _encode_cursor(self, val: any, fund_id: str) -> str:
         """Encode cursor data to base64 string."""
