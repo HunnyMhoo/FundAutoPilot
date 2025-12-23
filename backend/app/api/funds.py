@@ -12,41 +12,34 @@ router = APIRouter(prefix="/funds", tags=["funds"])
 
 @router.get("", response_model=FundListResponse)
 async def list_funds(
-    limit: int = Query(
-        default=25,
-        ge=1,
-        le=100,
-        description="Number of items to return per page"
-    ),
-    cursor: str | None = Query(
-        default=None,
-        description="Pagination cursor from previous response"
-    ),
-    sort: str = Query(
-        default="name_asc",
-        description="Sort order (currently only 'name_asc' supported)"
-    ),
+    limit: int = Query(25, ge=1, le=100, description="Items per page"),
+    cursor: str | None = Query(None, description="Next page cursor"),
+    sort: str = Query("name_asc", description="Sort order"),
+    q: str | None = Query(None, description="Search term"),
+    amc: list[str] | None = Query(None, description="Filter by AMC IDs"),
+    category: list[str] | None = Query(None, description="Filter by Category"),
+    risk: list[str] | None = Query(None, description="Filter by Risk Levels"),
+    fee_band: list[str] | None = Query(None, description="Filter by Fee Band (low, medium, high)"),
     db: AsyncSession = Depends(get_db),
 ) -> FundListResponse:
-    """
-    List mutual funds with cursor-based pagination.
-    
-    Returns a paginated list of active mutual funds across all AMCs.
-    
-    - **limit**: Number of items per page (1-100, default 25)
-    - **cursor**: Pagination cursor from `next_cursor` in previous response
-    - **sort**: Sort order (default: name_asc - alphabetical A-Z)
-    
-    The response includes:
-    - **items**: List of fund summaries
-    - **next_cursor**: Cursor for next page (null if end of results)
-    - **as_of_date**: Data freshness date
-    - **data_snapshot_id**: Unique identifier for this data snapshot
-    """
+    """List mutual funds with optional filters and sorting."""
     service = FundService(db)
     
+    filters = {
+        "amc": amc,
+        "category": category,
+        "risk": risk,
+        "fee_band": fee_band,
+    }
+    
     try:
-        return await service.list_funds(limit=limit, cursor=cursor, sort=sort)
+        return await service.list_funds(
+            limit=limit,
+            cursor=cursor,
+            sort=sort,
+            q=q,
+            filters=filters
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

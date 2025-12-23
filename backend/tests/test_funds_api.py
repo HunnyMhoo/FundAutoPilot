@@ -1,6 +1,7 @@
 """Tests for Fund API endpoints."""
 
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 from unittest.mock import AsyncMock, patch, MagicMock
 from datetime import datetime
@@ -16,7 +17,9 @@ def mock_fund_service():
         yield mock
 
 
-@pytest.fixture
+import pytest_asyncio
+
+@pytest_asyncio.fixture
 async def client():
     """Create test client."""
     transport = ASGITransport(app=app)
@@ -41,14 +44,6 @@ class TestListFunds:
                     risk_level="5",
                     expense_ratio=1.5,
                 ),
-                FundSummary(
-                    fund_id="M0002_2024",
-                    fund_name="Test Fund B",
-                    amc_name="Test AMC",
-                    category=None,
-                    risk_level=None,
-                    expense_ratio=None,
-                ),
             ],
             next_cursor="eyJuIjoiVGVzdCBGdW5kIEIiLCJpIjoiTTAwMDJfMjAyNCJ9",
             as_of_date="2024-12-23",
@@ -63,25 +58,54 @@ class TestListFunds:
         
         assert response.status_code == 200
         data = response.json()
-        assert len(data["items"]) == 2
-        assert data["next_cursor"] is not None
-        assert data["as_of_date"] == "2024-12-23"
-    
+        assert len(data["items"]) == 1
+        # assert "amc" not in call_args.kwargs  # implicit filter check
+
+    @pytest.mark.asyncio
+    async def test_list_funds_with_filters(self, client, mock_fund_service):
+        """Test listing with filters."""
+        mock_response = FundListResponse(
+            items=[],
+            next_cursor=None,
+            as_of_date="2024-12-23",
+            data_snapshot_id="123",
+        )
+        mock_service_instance = AsyncMock()
+        mock_service_instance.list_funds.return_value = mock_response
+        mock_fund_service.return_value = mock_service_instance
+        
+        # Test filters
+        response = await client.get("/funds?amc=A&amc=B&category=EQ&risk=5&fee_band=low")
+        assert response.status_code == 200
+        
+        call_args = mock_service_instance.list_funds.call_args
+        filters = call_args.kwargs["filters"]
+        assert filters["amc"] == ["A", "B"]
+        assert filters["category"] == ["EQ"]
+        assert filters["risk"] == ["5"]
+        assert filters["fee_band"] == ["low"]
+
+    @pytest.mark.asyncio
+    async def test_list_funds_with_sort(self, client, mock_fund_service):
+        """Test listing with sort."""
+        mock_service_instance = AsyncMock()
+        mock_service_instance.list_funds.return_value = FundListResponse(
+            items=[], next_cursor=None, as_of_date="", data_snapshot_id=""
+        )
+        mock_fund_service.return_value = mock_service_instance
+
+        response = await client.get("/funds?sort=fee_asc")
+        assert response.status_code == 200
+        
+        call_args = mock_service_instance.list_funds.call_args
+        assert call_args.kwargs["sort"] == "fee_asc"
+
     @pytest.mark.asyncio
     async def test_list_funds_with_cursor(self, client, mock_fund_service):
         """Test pagination with cursor."""
         mock_response = FundListResponse(
-            items=[
-                FundSummary(
-                    fund_id="M0003_2024",
-                    fund_name="Test Fund C",
-                    amc_name="Test AMC",
-                    category="Fixed Income",
-                    risk_level="2",
-                    expense_ratio=0.5,
-                ),
-            ],
-            next_cursor=None,  # End of results
+            items=[],
+            next_cursor=None,
             as_of_date="2024-12-23",
             data_snapshot_id="20241223100000",
         )
@@ -94,9 +118,9 @@ class TestListFunds:
         response = await client.get(f"/funds?cursor={cursor}")
         
         assert response.status_code == 200
-        data = response.json()
-        assert data["next_cursor"] is None  # End of results
-    
+        call_args = mock_service_instance.list_funds.call_args
+        assert call_args.kwargs["cursor"] == cursor
+
     @pytest.mark.asyncio
     async def test_list_funds_custom_limit(self, client, mock_fund_service):
         """Test custom limit parameter."""

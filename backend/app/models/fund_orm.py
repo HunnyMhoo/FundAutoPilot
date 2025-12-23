@@ -47,13 +47,18 @@ class Fund(Base):
     last_upd_date: Mapped[datetime | None] = mapped_column(DateTime)
     data_snapshot_id: Mapped[str | None] = mapped_column(String(50))
     
+    # Normalized fields for search
+    fund_name_norm: Mapped[str | None] = mapped_column(String(500))
+    fund_abbr_norm: Mapped[str | None] = mapped_column(String(50))
+    
     # Relationship
     amc: Mapped["AMC"] = relationship("AMC", back_populates="funds")
     
-    # Indexes for efficient pagination
+    # Indexes for efficient pagination and search
     __table_args__ = (
         Index("idx_fund_name_asc", "fund_name_en", "proj_id"),
         Index("idx_fund_status", "fund_status"),
+        Index("idx_fund_search", "fund_name_norm", "fund_abbr_norm"),
     )
     
     def __repr__(self) -> str:
