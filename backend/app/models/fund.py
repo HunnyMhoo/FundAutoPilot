@@ -113,3 +113,10 @@ class AMCListResponse(BaseModel):
         None,
         description="Cursor for next page, null if end of results"
     )
+
+
+class MetaResponse(BaseModel):
+    """Response for home page metadata (fund count and freshness)."""
+    total_fund_count: int = Field(..., description="Total number of active funds")
+    data_as_of: str = Field(..., description="Data freshness date (ISO format YYYY-MM-DD)")
+    data_source: str | None = Field(None, description="Data source identifier")

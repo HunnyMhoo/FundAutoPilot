@@ -2,8 +2,10 @@
 
 import base64
 import json
+import time
 from datetime import datetime
 from decimal import Decimal
+from typing import Dict, Any
 
 from sqlalchemy import select, and_, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +18,10 @@ from app.services.search.elasticsearch_backend import ElasticsearchSearchBackend
 from app.core.elasticsearch import get_elasticsearch_client
 
 settings = get_settings()
+
+# Simple in-memory cache for meta stats (TTL: 5 minutes = 300 seconds)
+_meta_cache: Dict[str, tuple[Dict[str, Any], float]] = {}
+CACHE_TTL = 300  # 5 minutes
 
 
 class FundService:
@@ -290,12 +296,15 @@ class FundService:
                 if amc_obj:
                     amc_name = amc_obj.name_en
 
+            # Use risk_level_int if available, fallback to risk_level string
+            risk_level_display = str(fund.risk_level_int) if fund.risk_level_int is not None else fund.risk_level
+            
             items.append(FundSummary(
                 fund_id=fund.proj_id,
                 fund_name=fund.fund_name_en,
                 amc_name=amc_name,
                 category=fund.category,
-                risk_level=fund.risk_level,
+                risk_level=risk_level_display,
                 expense_ratio=float(fund.expense_ratio) if fund.expense_ratio is not None else None,
             ))
 
@@ -337,6 +346,61 @@ class FundService:
             select(func.count(Fund.proj_id)).where(Fund.fund_status == "RG")
         )
         return result.scalar() or 0
+    
+    async def get_meta_stats(self) -> Dict[str, Any]:
+        """
+        Get metadata stats for home page (fund count and freshness).
+        
+        Uses in-memory cache with 5-minute TTL to reduce database load.
+        
+        Returns:
+            {
+                "total_fund_count": int,
+                "data_as_of": str (YYYY-MM-DD),
+                "data_source": str | None
+            }
+        """
+        # Check cache
+        cache_key = "meta_stats"
+        current_time = time.time()
+        
+        if cache_key in _meta_cache:
+            cached_data, cached_time = _meta_cache[cache_key]
+            if current_time - cached_time < CACHE_TTL:
+                return cached_data
+        
+        # Cache miss or expired - fetch from database
+        # Get fund count
+        fund_count = await self.get_fund_count()
+        
+        # Get freshness (same logic as list_funds)
+        snapshot_result = await self.db.execute(
+            select(Fund.data_snapshot_id, Fund.last_upd_date, Fund.data_source)
+            .where(Fund.data_snapshot_id.isnot(None))
+            .order_by(Fund.last_upd_date.desc())
+            .limit(1)
+        )
+        snapshot_row = snapshot_result.first()
+        
+        # Format freshness date
+        if snapshot_row and snapshot_row[1]:
+            data_as_of = snapshot_row[1].strftime("%Y-%m-%d")
+            data_source = snapshot_row[2] if snapshot_row[2] else None
+        else:
+            # Fallback to current date if no snapshot available
+            data_as_of = datetime.now().strftime("%Y-%m-%d")
+            data_source = None
+        
+        result = {
+            "total_fund_count": fund_count,
+            "data_as_of": data_as_of,
+            "data_source": data_source
+        }
+        
+        # Update cache
+        _meta_cache[cache_key] = (result, current_time)
+        
+        return result
 
     async def get_amcs_with_fund_counts(
         self,
@@ -590,37 +654,31 @@ class FundService:
     
     async def _get_risks_with_counts_sql(self) -> list[dict]:
         """SQL fallback for risk aggregation."""
+        # Use risk_level_int for proper numeric sorting
         query = (
             select(
-                Fund.risk_level,
+                Fund.risk_level_int,
                 func.count(Fund.proj_id).label("count")
             )
             .where(
                 and_(
                     Fund.fund_status == "RG",
-                    Fund.risk_level.isnot(None)
+                    Fund.risk_level_int.isnot(None)
                 )
             )
-            .group_by(Fund.risk_level)
-            .order_by(Fund.risk_level.asc())
+            .group_by(Fund.risk_level_int)
+            .order_by(Fund.risk_level_int.asc())
         )
         
         result = await self.db.execute(query)
         rows = result.all()
         
+        # Convert to string for API response (backward compatibility)
         results = [
-            {"value": row.risk_level, "count": row.count}
+            {"value": str(row.risk_level_int), "count": row.count}
             for row in rows
         ]
         
-        # Attempt numeric sort for risk levels (fallback to string if not numeric)
-        def sort_key(item):
-            try:
-                return int(item["value"])
-            except (ValueError, TypeError):
-                return item["value"]
-        
-        results.sort(key=sort_key)
         return results
     
     def _encode_amc_cursor(self, cursor_data: dict) -> str:
@@ -714,6 +772,9 @@ class FundService:
             as_of_date = datetime.now().strftime("%Y-%m-%d")
             last_updated_at = datetime.now().isoformat()
         
+        # Use risk_level_int if available, fallback to risk_level string
+        risk_level_display = str(fund.risk_level_int) if fund.risk_level_int is not None else fund.risk_level
+        
         return FundDetail(
             fund_id=fund.proj_id,
             fund_name=fund.fund_name_en,
@@ -721,11 +782,11 @@ class FundService:
             category=fund.category,
             amc_id=fund.amc_id,
             amc_name=amc_name,
-            risk_level=fund.risk_level,
+            risk_level=risk_level_display,
             expense_ratio=expense_ratio,
             as_of_date=as_of_date,
             last_updated_at=last_updated_at,
-            data_source=None,  # Not in current schema, can be added later
+            data_source=fund.data_source,  # Now available from schema
             data_version=fund.data_snapshot_id,
         )
     

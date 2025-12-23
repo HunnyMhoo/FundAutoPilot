@@ -182,3 +182,24 @@ export async function fetchAMCs(
 
     return response.json();
 }
+
+export interface MetaResponse {
+    total_fund_count: number;
+    data_as_of: string;
+    data_source: string | null;
+}
+
+export async function fetchMeta(): Promise<MetaResponse> {
+    const response = await fetch(`${API_BASE_URL}/meta`, {
+        method: 'GET',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+    });
+
+    if (!response.ok) {
+        throw new Error(`Failed to fetch metadata: ${response.status} ${response.statusText}`);
+    }
+
+    return response.json();
+}

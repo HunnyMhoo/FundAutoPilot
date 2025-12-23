@@ -201,6 +201,99 @@ class TestRootEndpoint:
         assert "version" in data
 
 
+class TestMetaEndpoint:
+    """Tests for GET /meta endpoint."""
+    
+    @pytest.mark.asyncio
+    async def test_get_meta_success(self, client):
+        """Test successful metadata retrieval."""
+        from unittest.mock import patch, AsyncMock
+        
+        mock_stats = {
+            "total_fund_count": 150,
+            "data_as_of": "2024-12-23",
+            "data_source": "SEC_THAILAND"
+        }
+        
+        with patch('main.FundService') as mock_service_class:
+            mock_service_instance = AsyncMock()
+            mock_service_instance.get_meta_stats = AsyncMock(return_value=mock_stats)
+            mock_service_class.return_value = mock_service_instance
+            
+            response = await client.get("/meta")
+            
+            assert response.status_code == 200
+            data = response.json()
+            assert data["total_fund_count"] == 150
+            assert data["data_as_of"] == "2024-12-23"
+            assert data["data_source"] == "SEC_THAILAND"
+            mock_service_instance.get_meta_stats.assert_called_once()
+    
+    @pytest.mark.asyncio
+    async def test_get_meta_no_data_source(self, client):
+        """Test metadata without data_source field."""
+        from unittest.mock import patch, AsyncMock
+        
+        mock_stats = {
+            "total_fund_count": 100,
+            "data_as_of": "2024-12-23",
+            "data_source": None
+        }
+        
+        with patch('main.FundService') as mock_service_class:
+            mock_service_instance = AsyncMock()
+            mock_service_instance.get_meta_stats = AsyncMock(return_value=mock_stats)
+            mock_service_class.return_value = mock_service_instance
+            
+            response = await client.get("/meta")
+            
+            assert response.status_code == 200
+            data = response.json()
+            assert data["total_fund_count"] == 100
+            assert data["data_as_of"] == "2024-12-23"
+            assert data["data_source"] is None
+    
+    @pytest.mark.asyncio
+    async def test_get_meta_empty_database(self, client):
+        """Test metadata with empty database (zero funds)."""
+        from unittest.mock import patch, AsyncMock
+        
+        mock_stats = {
+            "total_fund_count": 0,
+            "data_as_of": "2024-12-23",
+            "data_source": None
+        }
+        
+        with patch('main.FundService') as mock_service_class:
+            mock_service_instance = AsyncMock()
+            mock_service_instance.get_meta_stats = AsyncMock(return_value=mock_stats)
+            mock_service_class.return_value = mock_service_instance
+            
+            response = await client.get("/meta")
+            
+            assert response.status_code == 200
+            data = response.json()
+            assert data["total_fund_count"] == 0
+            assert data["data_as_of"] == "2024-12-23"
+    
+    @pytest.mark.asyncio
+    async def test_get_meta_error_handling(self, client):
+        """Test error handling when service fails."""
+        from unittest.mock import patch
+        
+        with patch('main.FundService') as mock_service_class:
+            mock_service_instance = AsyncMock()
+            mock_service_instance.get_meta_stats = AsyncMock(side_effect=Exception("Database error"))
+            mock_service_class.return_value = mock_service_instance
+            
+            response = await client.get("/meta")
+            
+            assert response.status_code == 500
+            data = response.json()
+            assert "detail" in data
+            assert "Failed to fetch metadata" in data["detail"]
+
+
 class TestGetFundById:
     """Tests for GET /funds/{fund_id} endpoint."""
     

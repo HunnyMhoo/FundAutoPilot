@@ -9,7 +9,8 @@ from app.models.fund import (
     FundDetail,
     CategoryListResponse,
     RiskListResponse,
-    AMCListResponse
+    AMCListResponse,
+    MetaResponse
 )
 from app.services.fund_service import FundService
 
@@ -58,6 +59,23 @@ async def get_fund_count(
     service = FundService(db)
     count = await service.get_fund_count()
     return {"count": count}
+
+
+@router.get("/meta", response_model=MetaResponse)
+async def get_meta(
+    db: AsyncSession = Depends(get_db),
+) -> MetaResponse:
+    """
+    Get metadata for home page (fund count and data freshness).
+    
+    Returns cached metadata with 5-minute TTL to ensure fast response times.
+    """
+    try:
+        service = FundService(db)
+        stats = await service.get_meta_stats()
+        return MetaResponse(**stats)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch metadata: {str(e)}")
 
 
 @router.get("/categories", response_model=CategoryListResponse)

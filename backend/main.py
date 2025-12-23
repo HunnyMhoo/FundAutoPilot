@@ -1,9 +1,14 @@
 """Switch Impact Simulator API - Main Application."""
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.funds import router as funds_router
+from app.core.database import get_db
+from app.services.fund_service import FundService
+from app.models.fund import MetaResponse
+from fastapi import HTTPException
 
 app = FastAPI(
     title="Switch Impact Simulator API",
@@ -41,3 +46,20 @@ def read_root():
 def health_check():
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+@app.get("/meta", response_model=MetaResponse)
+async def get_meta(
+    db: AsyncSession = Depends(get_db),
+) -> MetaResponse:
+    """
+    Get metadata for home page (fund count and data freshness).
+    
+    Returns cached metadata with 5-minute TTL to ensure fast response times.
+    """
+    try:
+        service = FundService(db)
+        stats = await service.get_meta_stats()
+        return MetaResponse(**stats)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch metadata: {str(e)}")
