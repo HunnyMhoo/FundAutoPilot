@@ -2,6 +2,7 @@
 
 import base64
 import json
+import logging
 import time
 from datetime import datetime
 from decimal import Decimal
@@ -13,6 +14,8 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
 from app.models.fund_orm import Fund, AMC
+
+logger = logging.getLogger(__name__)
 from app.models.fund import FundSummary, FundListResponse, CursorData
 from app.services.search.elasticsearch_backend import ElasticsearchSearchBackend
 from app.core.elasticsearch import get_elasticsearch_client
@@ -208,6 +211,8 @@ class FundService:
                 query = query.where(or_(*risk_conditions))
 
         # Fee Band (Derived)
+        # Note: Uses stored expense_ratio from database (approximate) for performance.
+        # For accurate expense ratio values, use FundDetail response or /funds/{fund_id}/fees endpoint.
         fee_bands = filters.get("fee_band")
         if fee_bands:
             fee_conditions = []
@@ -231,10 +236,14 @@ class FundService:
             primary_col = Fund.fund_name_en
             is_desc = True
         elif sort == "fee_asc":
+            # Note: Uses stored expense_ratio from database (approximate) for performance.
+            # For accurate expense ratio values, use FundDetail response or /funds/{fund_id}/fees endpoint.
             query = query.order_by(Fund.expense_ratio.asc().nullslast(), Fund.proj_id.asc())
             primary_col = Fund.expense_ratio
             is_desc = False
         elif sort == "fee_desc":
+            # Note: Uses stored expense_ratio from database (approximate) for performance.
+            # For accurate expense ratio values, use FundDetail response or /funds/{fund_id}/fees endpoint.
             query = query.order_by(Fund.expense_ratio.desc().nullslast(), Fund.proj_id.asc())
             primary_col = Fund.expense_ratio
             is_desc = True
@@ -310,7 +319,6 @@ class FundService:
                 amc_name=amc_name,
                 category=fund.category,
                 risk_level=risk_level_display,
-                expense_ratio=float(fund.expense_ratio) if fund.expense_ratio is not None else None,
                 aimc_category=fund.aimc_category,
                 aimc_category_source=fund.aimc_category_source,
             ))
@@ -775,10 +783,20 @@ class FundService:
             if amc_obj:
                 amc_name = amc_obj.name_en
         
-        # Format expense_ratio to 3 decimals if present
+        # Get actual expense ratio from fee breakdown (matching what fund detail page shows)
+        # Note: expense_ratio field is not displayed in UI, but we calculate it here for API response
         expense_ratio = None
-        if fund.expense_ratio is not None:
-            expense_ratio = round(float(fund.expense_ratio), 3)
+        try:
+            # Try to get actual expense ratio from fee breakdown
+            fee_breakdown = await self.get_fee_breakdown(display_fund_id)
+            if fee_breakdown.get("total_expense_ratio_actual") is not None:
+                expense_ratio = round(float(fee_breakdown["total_expense_ratio_actual"]), 3)
+            elif fee_breakdown.get("total_expense_ratio") is not None:
+                expense_ratio = round(float(fee_breakdown["total_expense_ratio"]), 3)
+        except Exception:
+            # Fallback to stored expense_ratio if fee breakdown unavailable
+            if fund.expense_ratio is not None:
+                expense_ratio = round(float(fund.expense_ratio), 3)
         
         # Format dates
         as_of_date = None
@@ -841,6 +859,30 @@ class FundService:
         except Exception:
             pass
         
+        # Fetch dividend policy data (2.5)
+        dividend_policy = None
+        dividend_policy_remark = None
+        try:
+            dividend_data = await self._get_dividend_data(fund.proj_id, fund.class_abbr_name)
+            if dividend_data:
+                dividend_policy = dividend_data.get('dividend_policy')
+                dividend_policy_remark = dividend_data.get('dividend_policy_remark')
+        except Exception:
+            pass
+        
+        # Fetch fund policy data (2.3)
+        fund_policy_type = None
+        management_style = None
+        management_style_desc = None
+        try:
+            policy_data = await self._get_policy_data(fund.proj_id)
+            if policy_data:
+                fund_policy_type = policy_data.get('policy_desc')
+                management_style = policy_data.get('management_style')
+                management_style_desc = self._format_management_style(management_style)
+        except Exception:
+            pass
+        
         return FundDetail(
             fund_id=display_fund_id,
             fund_name=fund.fund_name_en,
@@ -856,6 +898,13 @@ class FundService:
             min_redemption=min_redemption,
             min_balance=min_balance,
             redemption_period=redemption_period,
+            fund_policy_type=fund_policy_type,
+            management_style=management_style,
+            management_style_desc=management_style_desc,
+            dividend_policy=dividend_policy,
+            dividend_policy_remark=dividend_policy_remark,
+            proj_id=fund.proj_id,
+            class_abbr_name=fund.class_abbr_name if fund.class_abbr_name else None,
             as_of_date=as_of_date,
             last_updated_at=last_updated_at,
             data_source=fund.data_source,  # Now available from schema
@@ -992,3 +1041,326 @@ class FundService:
             return "medium"
         else:
             return "high"
+    
+    async def _get_dividend_data(self, proj_id: str, class_abbr_name: str | None = None) -> dict | None:
+        """
+        Fetch dividend/distribution data from SEC API.
+        
+        Args:
+            proj_id: Fund project ID
+            class_abbr_name: Optional share class abbreviation to filter by
+            
+        Returns:
+            Dictionary with dividend data for the specified class or None
+        """
+        from app.utils.sec_api_client import SECAPIClient
+        
+        try:
+            client = SECAPIClient()
+            data_list, error = client.fetch_dividend(proj_id)
+            if data_list and not error and len(data_list) > 0:
+                # If class specified, find matching class data
+                if class_abbr_name:
+                    for item in data_list:
+                        if item.get('class_abbr_name') == class_abbr_name:
+                            return item
+                # Return first item if no class match or no class specified
+                return data_list[0]
+        except Exception:
+            pass
+        return None
+    
+    async def _get_policy_data(self, proj_id: str) -> dict | None:
+        """
+        Fetch fund policy data from SEC API.
+        
+        Args:
+            proj_id: Fund project ID
+            
+        Returns:
+            Dictionary with policy data or None if unavailable
+        """
+        from app.utils.sec_api_client import SECAPIClient
+        
+        try:
+            client = SECAPIClient()
+            data, error = client.fetch_policy(proj_id)
+            if data and not error:
+                return data
+        except Exception:
+            pass
+        return None
+    
+    @staticmethod
+    def _format_management_style(style_code: str | None) -> str | None:
+        """
+        Format management style code to human-readable description.
+        
+        SEC API management_style codes:
+        AN = Active management
+        PN = Passive management (index-tracking)
+        """
+        if not style_code:
+            return None
+        
+        STYLE_MAP = {
+            'AN': 'Active',
+            'PN': 'Passive (Index-tracking)',
+        }
+        return STYLE_MAP.get(style_code, style_code)
+    
+    async def get_share_classes(self, fund_id: str) -> dict:
+        """
+        Get all share classes for a fund.
+        
+        Args:
+            fund_id: Fund ID (class_abbr_name or proj_id)
+            
+        Returns:
+            Dictionary with share class information
+        """
+        from app.models.fund import ShareClassInfo, ShareClassListResponse
+        from app.utils.sec_api_client import SECAPIClient
+        
+        # First, find the fund to get its proj_id
+        fund = await self._get_fund_record(fund_id)
+        if not fund:
+            raise ValueError(f"Fund not found: {fund_id}")
+        
+        proj_id = fund.proj_id
+        current_class = fund.class_abbr_name or ""
+        
+        # Fetch share classes from SEC API
+        client = SECAPIClient()
+        classes_data, error = client.fetch_class_fund(proj_id)
+        
+        # Also fetch dividend data to show dividend policy per class
+        dividend_data_list, _ = client.fetch_dividend(proj_id)
+        dividend_map = {}
+        if dividend_data_list:
+            for div in dividend_data_list:
+                class_name = div.get('class_abbr_name', '')
+                dividend_map[class_name] = div.get('dividend_policy')
+        
+        classes = []
+        if classes_data and not error:
+            for cls in classes_data:
+                class_abbr = cls.get('class_abbr_name', '')
+                classes.append(ShareClassInfo(
+                    class_abbr_name=class_abbr,
+                    class_name=cls.get('class_name'),
+                    class_description=cls.get('class_additional_desc'),
+                    is_current=(class_abbr == current_class),
+                    dividend_policy=dividend_map.get(class_abbr),
+                ))
+        
+        # If no classes from API, create single entry for current fund
+        if not classes:
+            classes.append(ShareClassInfo(
+                class_abbr_name=current_class or fund_id,
+                class_name=None,
+                class_description=None,
+                is_current=True,
+                dividend_policy=dividend_map.get(current_class),
+            ))
+        
+        return {
+            "proj_id": proj_id,
+            "fund_name": fund.fund_name_en,
+            "current_class": current_class or fund_id,
+            "classes": classes,
+            "total_classes": len(classes),
+        }
+    
+    async def get_fee_breakdown(self, fund_id: str) -> dict:
+        """
+        Get detailed fee breakdown for a fund.
+        
+        Args:
+            fund_id: Fund ID (class_abbr_name or proj_id)
+            
+        Returns:
+            Dictionary with fee breakdown by section
+        """
+        from app.models.fund import FeeBreakdownItem, FeeBreakdownSection
+        from app.utils.sec_api_client import SECAPIClient
+        
+        # Find the fund to get its proj_id and class
+        fund = await self._get_fund_record(fund_id)
+        if not fund:
+            raise ValueError(f"Fund not found: {fund_id}")
+        
+        proj_id = fund.proj_id
+        class_abbr_name = fund.class_abbr_name or ""
+        
+        # Fetch fees from SEC API
+        client = SECAPIClient()
+        fees_data, error = client.fetch_fees(proj_id)
+        
+        logger.info(f"Fee breakdown for {fund_id}: proj_id={proj_id}, class={class_abbr_name}, fees_count={len(fees_data) if fees_data else 0}, error={error}")
+        
+        if not fees_data or error:
+            return {
+                "fund_id": fund_id,
+                "class_abbr_name": class_abbr_name or None,
+                "sections": [],
+                "total_expense_ratio": float(fund.expense_ratio) if fund.expense_ratio else None,
+                "total_expense_ratio_actual": None,
+                "last_upd_date": None,
+            }
+        
+        # Filter fees for current class
+        # Try exact match first, then try matching without empty string issues
+        class_fees = [f for f in fees_data if f.get('class_abbr_name') == class_abbr_name]
+        
+        # If no exact match and we have a class name, try partial matching
+        if not class_fees and class_abbr_name:
+            class_fees = [f for f in fees_data if class_abbr_name in (f.get('class_abbr_name') or '')]
+        
+        # If still no match, use all fees (fund may not have class-specific fees)
+        if not class_fees:
+            class_fees = fees_data
+        
+        logger.info(f"Filtered fees for class '{class_abbr_name}': {len(class_fees)} fees")
+        
+        # Categorize fees into transaction and recurring
+        transaction_fees = []
+        recurring_fees = []
+        total_expense = None
+        total_expense_actual = None
+        last_upd_date = None
+        
+        # Fee type mappings - use contains matching for flexibility
+        FEE_TYPE_MAPPINGS = [
+            ('ค่าธรรมเนียมการขายหน่วยลงทุน', 'front_end_fee', 'Front-end Fee'),
+            ('ค่าธรรมเนียมการรับซื้อคืนหน่วยลงทุน', 'back_end_fee', 'Back-end Fee'),
+            ('ค่าธรรมเนียมการสับเปลี่ยนหน่วยลงทุนเข้า', 'switch_in_fee', 'Switching In Fee'),
+            ('ค่าธรรมเนียมการสับเปลี่ยนหน่วยลงทุนออก', 'switch_out_fee', 'Switching Out Fee'),
+            ('ค่าธรรมเนียมการโอนหน่วยลงทุน', 'transfer_fee', 'Transfer Fee'),
+            ('ค่าธรรมเนียมการจัดการ', 'management_fee', 'Management Fee'),
+            ('ค่าธรรมเนียมนายทะเบียน', 'registrar_fee', 'Registrar Fee'),
+            ('ค่าธรรมเนียมผู้ดูแลผลประโยชน์', 'custodian_fee', 'Custodian Fee'),
+            ('ค่าใช้จ่ายอื่น', 'other_expenses', 'Other Expenses'),
+            ('ค่าธรรมเนียมและค่าใช้จ่ายรวม', 'total_fees', 'Total Fees & Expenses'),
+        ]
+        
+        TRANSACTION_FEE_TYPES = {'front_end_fee', 'back_end_fee', 'switch_in_fee', 'switch_out_fee', 'transfer_fee'}
+        
+        def match_fee_type(fee_desc: str) -> tuple | None:
+            """Match fee description to fee type using contains matching."""
+            fee_desc_clean = fee_desc.strip() if fee_desc else ''
+            for pattern, fee_type, fee_type_en in FEE_TYPE_MAPPINGS:
+                if pattern in fee_desc_clean:
+                    return (fee_type, fee_type_en)
+            return None
+        
+        # Track seen fee types to avoid duplicates
+        seen_fee_types = set()
+        
+        for fee in class_fees:
+            fee_desc = fee.get('fee_type_desc', '')
+            mapping = match_fee_type(fee_desc)
+            
+            if not mapping:
+                continue
+            
+            fee_type, fee_type_en = mapping
+            
+            # Skip duplicates (same fee type might appear multiple times)
+            if fee_type in seen_fee_types and fee_type != 'total_fees':
+                continue
+            seen_fee_types.add(fee_type)
+            
+            # Track last update date
+            if fee.get('last_upd_date'):
+                last_upd_date = fee.get('last_upd_date')
+            
+            # Handle total expense ratio separately
+            if fee_type == 'total_fees':
+                try:
+                    rate_str = fee.get('rate', '')
+                    if rate_str and rate_str != '-':
+                        # Remove % and any whitespace
+                        rate_clean = rate_str.replace('%', '').strip()
+                        total_expense = float(rate_clean)
+                    actual_str = fee.get('actual_value', '')
+                    if actual_str and actual_str != '-':
+                        actual_clean = actual_str.replace('%', '').strip()
+                        total_expense_actual = float(actual_clean)
+                except (ValueError, AttributeError, TypeError):
+                    pass
+                continue
+            
+            fee_item = FeeBreakdownItem(
+                fee_type=fee_type,
+                fee_type_desc=fee_desc,
+                fee_type_desc_en=fee_type_en,
+                rate=fee.get('rate'),
+                rate_unit=fee.get('rate_unit'),
+                actual_value=fee.get('actual_value'),
+                actual_value_unit=fee.get('actual_value_unit'),
+            )
+            
+            if fee_type in TRANSACTION_FEE_TYPES:
+                transaction_fees.append(fee_item)
+            else:
+                recurring_fees.append(fee_item)
+        
+        sections = []
+        if transaction_fees:
+            sections.append(FeeBreakdownSection(
+                section_key='transaction',
+                section_label='Transaction Fees',
+                fees=transaction_fees,
+            ))
+        if recurring_fees:
+            sections.append(FeeBreakdownSection(
+                section_key='recurring',
+                section_label='Recurring Fees',
+                fees=recurring_fees,
+            ))
+        
+        logger.info(f"Fee breakdown result: {len(transaction_fees)} transaction, {len(recurring_fees)} recurring, total_expense={total_expense}")
+        
+        # Calculate fallback expense ratio from fee_data_raw if available (more accurate than stored expense_ratio)
+        fallback_expense_ratio = None
+        if not total_expense and fund.fee_data_raw and isinstance(fund.fee_data_raw, list):
+            from app.utils.fee_calculator import calculate_expense_ratio
+            try:
+                calculated = calculate_expense_ratio(fund.fee_data_raw, class_abbr=class_abbr_name)
+                if calculated is not None:
+                    fallback_expense_ratio = float(calculated)
+            except Exception:
+                pass
+        
+        return {
+            "fund_id": fund_id,
+            "class_abbr_name": class_abbr_name or None,
+            "sections": sections,
+            "total_expense_ratio": total_expense or fallback_expense_ratio or (float(fund.expense_ratio) if fund.expense_ratio else None),
+            "total_expense_ratio_actual": total_expense_actual,
+            "last_upd_date": last_upd_date,
+        }
+    
+    async def _get_fund_record(self, fund_id: str):
+        """
+        Get fund ORM record by fund_id.
+        
+        Args:
+            fund_id: Fund ID (class_abbr_name or proj_id)
+            
+        Returns:
+            Fund ORM object or None
+        """
+        # Try lookup by class_abbr_name first
+        query = select(Fund).where(Fund.class_abbr_name == fund_id)
+        result = await self.db.execute(query)
+        fund = result.scalar_one_or_none()
+        
+        if not fund:
+            # Fallback to proj_id
+            query = select(Fund).where(Fund.proj_id == fund_id).where(Fund.class_abbr_name == "")
+            result = await self.db.execute(query)
+            fund = result.scalar_one_or_none()
+        
+        return fund

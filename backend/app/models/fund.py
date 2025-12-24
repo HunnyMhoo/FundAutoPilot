@@ -12,13 +12,15 @@ class FundSummary(BaseModel):
     amc_name: str = Field(..., description="Asset Management Company name")
     category: str | None = Field(None, description="Fund category/type")
     risk_level: str | None = Field(None, description="Risk level (1-8 or descriptive)")
-    expense_ratio: float | None = Field(None, description="Annual expense ratio percentage")
     aimc_category: str | None = Field(None, description="AIMC fund classification")
     aimc_category_source: str | None = Field(None, description="Source: 'AIMC_CSV' or 'SEC_API'")
     
     # New fields for Fund Card badges (1.2, 1.3)
     dividend_policy: str | None = Field(None, description="Dividend policy: 'Y' (pays dividends) or 'N' (accumulating)")
     management_style: str | None = Field(None, description="Management style display: 'Passive' or 'Active'")
+    
+    # Note: expense_ratio removed from FundSummary (not displayed in UI, would require expensive per-fund calculations)
+    # For accurate expense ratio, see FundDetail response or /funds/{fund_id}/fees endpoint
     
     class Config:
         from_attributes = True
@@ -44,8 +46,7 @@ class FundListResponse(BaseModel):
                         "fund_name": "THE RUANG KHAO 4 FUND",
                         "amc_name": "KASIKORN ASSET MANAGEMENT",
                         "category": "Equity",
-                        "risk_level": "6",
-                        "expense_ratio": 2.01
+                        "risk_level": "6"
                     }
                 ],
                 "next_cursor": "eyJuIjoiVEhFIFJVQU5HIiwiaSI6Ik0wMDA4XzI1MzcifQ==",
@@ -83,6 +84,19 @@ class FundDetail(BaseModel):
     min_redemption: str | None = Field(None, description="Minimum redemption amount with currency")
     min_balance: str | None = Field(None, description="Minimum balance to maintain with currency")
     redemption_period: str | None = Field(None, description="Redemption period (e.g., 'Every business day')")
+    
+    # Fund Policy & Management Style (2.3)
+    fund_policy_type: str | None = Field(None, description="Fund policy type (e.g., 'Equity', 'Fixed Income')")
+    management_style: str | None = Field(None, description="Management style code (e.g., 'PN' for Passive)")
+    management_style_desc: str | None = Field(None, description="Management style description (e.g., 'Passive (Index-tracking)')")
+    
+    # Distribution Policy (2.5)
+    dividend_policy: str | None = Field(None, description="Dividend policy: 'Y' (pays dividends) or 'N' (accumulating)")
+    dividend_policy_remark: str | None = Field(None, description="Additional dividend policy remarks")
+    
+    # Share Class Info (2.1) - proj_id for sibling lookup
+    proj_id: str | None = Field(None, description="Project ID for looking up sibling share classes")
+    class_abbr_name: str | None = Field(None, description="Current share class abbreviation")
     
     as_of_date: str | None = Field(None, description="Data snapshot date (ISO format)")
     last_updated_at: str | None = Field(None, description="Last update timestamp (ISO format)")
@@ -266,12 +280,27 @@ class InputsEcho(BaseModel):
     target_category: str | None = Field(None, description="Target fund category")
 
 
+class ConstraintsDelta(BaseModel):
+    """Constraints differences between current and target funds."""
+    min_subscription_current: str | None = Field(None, description="Current fund minimum subscription (with currency)")
+    min_subscription_target: str | None = Field(None, description="Target fund minimum subscription (with currency)")
+    min_subscription_diff: str | None = Field(None, description="Descriptive difference in minimum subscription")
+    min_redemption_current: str | None = Field(None, description="Current fund minimum redemption (with currency)")
+    min_redemption_target: str | None = Field(None, description="Target fund minimum redemption (with currency)")
+    min_redemption_diff: str | None = Field(None, description="Descriptive difference in minimum redemption")
+    redemption_period_current: str | None = Field(None, description="Current fund redemption period")
+    redemption_period_target: str | None = Field(None, description="Target fund redemption period")
+    redemption_period_changed: bool | None = Field(None, description="Whether redemption period changed")
+    cut_off_time_changed: bool | None = Field(None, description="Whether cut-off times changed")
+
+
 class Deltas(BaseModel):
     """Calculated deltas between current and target funds."""
     expense_ratio_delta: float | None = Field(None, description="Difference in expense ratio (target - current)")
     annual_fee_thb_delta: float | None = Field(None, description="Annual fee drag difference in THB (rounded to nearest THB)")
     risk_level_delta: int | None = Field(None, description="Risk level change (target - current, integer)")
     category_changed: bool | None = Field(None, description="Whether category changed")
+    constraints_delta: ConstraintsDelta | None = Field(None, description="Constraints differences")
 
 
 class Explainability(BaseModel):
@@ -281,6 +310,14 @@ class Explainability(BaseModel):
     formula_display: str = Field(..., description="Exact formula text for display")
     assumptions: list[str] = Field(default_factory=list, description="List of assumptions (short bullets)")
     disclaimers: list[str] = Field(default_factory=list, description="Mandatory disclaimers")
+
+
+class SwitchPreviewMissingFlags(BaseModel):
+    """Per-section missing data flags for switch preview."""
+    fee_missing: bool = Field(False, description="Fee data is missing for one or both funds")
+    risk_missing: bool = Field(False, description="Risk data is missing for one or both funds")
+    category_missing: bool = Field(False, description="Category data is missing for one or both funds")
+    constraints_missing: bool = Field(False, description="Constraints data is missing for one or both funds")
 
 
 class Coverage(BaseModel):
@@ -297,3 +334,54 @@ class SwitchPreviewResponse(BaseModel):
     deltas: Deltas = Field(..., description="Calculated deltas")
     explainability: Explainability = Field(..., description="Explanation and disclaimers")
     coverage: Coverage = Field(..., description="Data coverage status")
+    missing_flags: SwitchPreviewMissingFlags = Field(..., description="Per-section missing data flags")
+    data_snapshot_id: str | None = Field(None, description="Data snapshot ID for freshness tracking")
+    as_of_date: str | None = Field(None, description="Data freshness date (ISO format)")
+
+
+# Share Class models (2.1)
+class ShareClassInfo(BaseModel):
+    """Share class information for fund detail view."""
+    class_abbr_name: str = Field(..., description="Share class abbreviation (e.g., 'SCBNK225E')")
+    class_name: str | None = Field(None, description="Share class name in Thai")
+    class_description: str | None = Field(None, description="Share class description (decoded)")
+    is_current: bool = Field(False, description="Whether this is the currently viewed class")
+    dividend_policy: str | None = Field(None, description="Dividend policy for this class: 'Y' or 'N'")
+
+
+class ShareClassListResponse(BaseModel):
+    """Response for share class list endpoint."""
+    proj_id: str = Field(..., description="Fund project ID")
+    fund_name: str = Field(..., description="Fund name")
+    current_class: str = Field(..., description="Currently viewed class abbreviation")
+    classes: list[ShareClassInfo] = Field(..., description="List of all share classes for this fund")
+    total_classes: int = Field(..., description="Total number of share classes")
+
+
+# Fee Breakdown models (2.2)
+class FeeBreakdownItem(BaseModel):
+    """Individual fee item for breakdown display."""
+    fee_type: str = Field(..., description="Fee type key (e.g., 'management_fee', 'front_end_fee')")
+    fee_type_desc: str = Field(..., description="Fee type description in Thai")
+    fee_type_desc_en: str | None = Field(None, description="Fee type description in English")
+    rate: str | None = Field(None, description="Maximum/prospectus rate")
+    rate_unit: str | None = Field(None, description="Rate unit description")
+    actual_value: str | None = Field(None, description="Actual charged value")
+    actual_value_unit: str | None = Field(None, description="Actual value unit")
+
+
+class FeeBreakdownSection(BaseModel):
+    """Section of fees (transaction or recurring)."""
+    section_key: str = Field(..., description="Section key: 'transaction' or 'recurring'")
+    section_label: str = Field(..., description="Section display label")
+    fees: list[FeeBreakdownItem] = Field(..., description="List of fees in this section")
+
+
+class FeeBreakdownResponse(BaseModel):
+    """Response for fee breakdown endpoint."""
+    fund_id: str = Field(..., description="Fund ID")
+    class_abbr_name: str | None = Field(None, description="Share class (if applicable)")
+    sections: list[FeeBreakdownSection] = Field(..., description="Fee sections")
+    total_expense_ratio: float | None = Field(None, description="Total expense ratio percentage")
+    total_expense_ratio_actual: float | None = Field(None, description="Actual total expense ratio")
+    last_upd_date: str | None = Field(None, description="Last update date for fee data")

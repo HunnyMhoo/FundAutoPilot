@@ -42,7 +42,6 @@ class TestListFunds:
                     amc_name="Test AMC",
                     category="Equity",
                     risk_level="5",
-                    expense_ratio=1.5,
                 ),
             ],
             next_cursor="eyJuIjoiVGVzdCBGdW5kIEIiLCJpIjoiTTAwMDJfMjAyNCJ9",

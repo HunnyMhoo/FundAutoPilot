@@ -30,15 +30,25 @@ The application consists of:
 - **Current limitations**: 6% of funds (330) have no AIMC classification available
 
 ### Fund Detail Page
-- **What it does**: Displays comprehensive fund information including fund classification (Risk Level, AIMC Type, Expense Ratio) and investment requirements (minimum investment, redemption, balance, redemption period). Two-tier layout: Tier 1 shows hero metrics in card grid, Tier 2 shows investment requirements.
-- **Where it lives**: `frontend/app/funds/[fundId]/page.tsx`, `frontend/components/FundDetail/FundDetailView.tsx`, `frontend/components/FundDetail/KeyFactsCard.tsx`
+- **What it does**: Displays comprehensive fund information including fund classification (Risk Level, AIMC Type), investment requirements, share class navigation, fee breakdown, investment strategy, and distribution policy. Multi-card layout with data fetched from SEC API.
+- **Where it lives**: 
+  - `frontend/app/funds/[fundId]/page.tsx`, `frontend/components/FundDetail/FundDetailView.tsx`
+  - `frontend/components/FundDetail/KeyFactsCard.tsx` - Fund Classification (Risk Level, AIMC Type) and Investment Requirements
+  - `frontend/components/FundDetail/ShareClassCard.tsx` - Share class navigation (2.1)
+  - `frontend/components/FundDetail/FeeBreakdownCard.tsx` - Detailed fee breakdown with Max/Actual values (2.2)
+  - `frontend/components/FundDetail/FundPolicyCard.tsx` - Investment strategy and management style (2.3)
+  - `frontend/components/FundDetail/DistributionPolicyCard.tsx` - Dividend/distribution policy (2.5)
 - **How to verify**: Click on any fund card, see fund detail page with:
   - Fund name, AMC, category in header
-  - "Fund Classification" section with Risk Level (badge), AIMC Type (with * if SEC_API fallback), Expense Ratio
-  - "Investment Requirements" section with minimum investment, redemption, balance, and redemption period (when available)
+  - "Fund Classification" section with Risk Level (badge), AIMC Type (with * if SEC_API fallback)
+  - "Investment Requirements" section with minimum investment, redemption, balance, and redemption period
+  - "Share Classes" card showing current class and links to sibling classes (when multiple classes exist)
+  - "Fee Structure" card with Transaction Fees and Recurring Fees sections, showing Max (prospectus) and Actual (charged) rates, Total Expense Ratio
+  - "Investment Strategy" card with Policy Type, AIMC Category, and Management Style (Passive/Active with description)
+  - "Distribution Policy" card showing dividend policy (Income/Accumulating) with description
   - "Add to Compare" button
   - Data freshness badge
-- **Current limitations**: Investment constraints fetched on-demand from SEC API (may be slow for first load)
+- **Current limitations**: Investment constraints, fees, policy, and dividend data fetched on-demand from SEC API (may be slow for first load)
 
 ### Compare Funds (US-N6)
 - **What it does**: Compare 2-3 funds side-by-side with fees breakdown (front-end, back-end, switching, ongoing), risk levels, dealing constraints (cut-off times, minimums, settlement), and distribution data. Persistent compare tray at bottom of screen shows selected funds with add/remove functionality. URL-first state management enables shareable comparison links.
@@ -53,6 +63,21 @@ The application consists of:
   - Verify missing data shows "Not available" with tooltips
   - Copy and share URL - comparison persists on reload
 - **Current limitations**: Class selector not implemented (uses deterministic default class selection)
+
+### Switch Impact Preview (US-N8)
+- **What it does**: Preview the impact of switching from a current fund to a target fund, showing fee impact estimate (annual fee drag difference), risk level change, category/AIMC type change, and key dealing constraints differences (minimums, redemption period, cut-off times). Explainable calculations with formulas, assumptions, and disclaimers. Data coverage classification (HIGH/MEDIUM/LOW/BLOCKED) with per-section missing flags. Preview requests are logged for traceability.
+- **Where it lives**: 
+  - Backend: `backend/app/services/switch_service.py`, `backend/app/api/switch.py` (POST `/switch/preview`), `backend/app/models/fund_orm.py` (SwitchPreviewLog table)
+  - Frontend: `frontend/app/switch/page.tsx`, `frontend/components/Switch/` (SwitchPreviewPage, FeeImpactCard, RiskChangeCard, CategoryChangeCard, ConstraintsDeltaCard, ExplanationCard), `frontend/components/Compare/SwitchPreviewPanel.tsx`
+- **How to verify**: 
+  - Navigate to `/compare?ids=<id1>,<id2>` and click "Switch Preview" button
+  - Select current and target funds from compared set, enter amount (default 100,000 THB)
+  - View preview showing annual fee delta estimate, risk change (integer delta), category change flag, and constraints differences
+  - Verify explanation section shows formulas and assumptions
+  - Verify missing data sections show "Not available" with appropriate flags
+  - Check data freshness badge shows snapshot date
+  - Preview request is persisted to `switch_preview_log` table
+- **Current limitations**: Uses actual expense ratio from SEC API fee breakdown (matches fund detail page), falls back to stored expense_ratio if API unavailable
 
 ### Search Funds
 - **What it does**: Case-insensitive search across fund names and abbreviations with debounced input, multi-tier ranking (exact match → prefix match → substring match), search-specific empty state with clear action
@@ -111,14 +136,31 @@ The application consists of:
 - Purpose: Root endpoint with API info
 - Returns: API message, version, docs URL
 
-**GET /funds/{fund_id}** (`backend/app/api/funds.py` lines 227-277)
+**GET /funds/{fund_id}** (`backend/app/api/funds.py`)
 - Purpose: Get detailed fund information by fund_id
 - Handler: `get_fund_by_id()` in `backend/app/api/funds.py`
 - Path parameter: `fund_id` - Can be class_abbr_name (e.g., "K-INDIA-A(A)") or proj_id for backward compatibility. URL-encoded characters (e.g., `%26` for `&`) are automatically decoded.
-- Returns: `FundDetail` with fund information including AIMC classification, risk level, expense ratio, and investment constraints (minimum investment, redemption, balance, redemption period)
+- Returns: `FundDetail` with fund information including AIMC classification, risk level, investment constraints, fund policy type, management style (with description), dividend policy, proj_id, and class_abbr_name for share class navigation
 - Share class support: Supports lookup by class name. Returns class name as `fund_id` when class exists.
 - Investment constraints: Fetches minimum investment, redemption, and balance from SEC API `/fund/{proj_id}/investment` endpoint
 - Redemption period: Fetches redemption period from SEC API `/fund/{proj_id}/redemption` endpoint and formats for display
+- Dividend policy: Fetches dividend policy from SEC API `/fund/{proj_id}/dividend` endpoint
+- Fund policy: Fetches policy type and management style from SEC API `/fund/{proj_id}/policy` endpoint
+
+**GET /funds/{fund_id}/share-classes** (`backend/app/api/funds.py`)
+- Purpose: Get all share classes for a fund (feature 2.1)
+- Handler: `get_share_classes()` in `backend/app/api/funds.py`
+- Path parameter: `fund_id` - Can be class_abbr_name or proj_id
+- Returns: `ShareClassListResponse` with proj_id, fund_name, current_class, classes array (class_abbr_name, class_name, class_description, is_current, dividend_policy), total_classes
+- Data source: Fetches from SEC API `/fund/{proj_id}/class_fund` and `/fund/{proj_id}/dividend` endpoints
+
+**GET /funds/{fund_id}/fees** (`backend/app/api/funds.py`)
+- Purpose: Get detailed fee breakdown for a fund (feature 2.2)
+- Handler: `get_fee_breakdown()` in `backend/app/api/funds.py`
+- Path parameter: `fund_id` - Can be class_abbr_name or proj_id
+- Returns: `FeeBreakdownResponse` with fund_id, class_abbr_name, sections array (transaction fees, recurring fees), total_expense_ratio, total_expense_ratio_actual, last_upd_date
+- Fee sections: Transaction (front-end, back-end, switching, transfer) and Recurring (management, registrar, custodian, other)
+- Data source: Fetches from SEC API `/fund/{proj_id}/fee` endpoint, filters by class
 
 **GET /funds/compare** (`backend/app/api/funds.py`)
 - Purpose: Compare 2-3 funds side-by-side with detailed comparison data
@@ -127,6 +169,15 @@ The application consists of:
 - Returns: `CompareFundsResponse` with funds array (identity, risk, fees grouped by category, dealing constraints, distribution), missing_flags per fund, errors array for non-fatal issues
 - Validation: Enforces 2-3 funds, removes duplicates, validates fund IDs
 - Error handling: Returns 400 for invalid number of funds, 404 for not found, 500 for server errors
+
+**POST /switch/preview** (`backend/app/api/switch.py`)
+- Purpose: Generate switch impact preview for switching from current to target fund (US-N8)
+- Handler: `get_switch_preview()` in `backend/app/api/switch.py`
+- Request body: `SwitchPreviewRequest` with `current_fund_id`, `target_fund_id`, `amount_thb`
+- Returns: `SwitchPreviewResponse` with calculated deltas (expense_ratio_delta, annual_fee_thb_delta, risk_level_delta, category_changed, constraints_delta), explainability (formulas, assumptions, disclaimers), coverage status (HIGH/MEDIUM/LOW/BLOCKED), per-section missing flags, data_snapshot_id, as_of_date
+- Validation: Enforces different funds, positive amount, fund existence
+- Error handling: Returns 400 for invalid request, 404 for fund not found, 500 for server errors
+- Logging: Persists preview request to `switch_preview_log` table with deltas and missing flags
 
 **GET /health** (`backend/main.py` lines 40-43)
 - Purpose: Health check endpoint
@@ -168,7 +219,14 @@ The application consists of:
 - Indexes:
   - `idx_amc_name_search` on (`name_en`, `name_th`) - For typeahead search (US-N3)
 
-**Migration/Seeding**: Tables created via `Base.metadata.create_all()` in ingestion script (`backend/app/services/ingestion/ingest_funds.py` line 194). Schema migrations handled via `backend/app/services/ingestion/migrate_schema.py` script (adds columns, updates primary keys, creates indexes). AIMC classification columns added via `backend/app/services/ingestion/migrate_aimc_columns.py` script. No Alembic migrations present.
+`switch_preview_log` (`backend/app/models/fund_orm.py`)
+- Primary key: `id` (Integer, autoincrement)
+- Fields: `created_at` (DateTime), `current_fund_id` (String(50)), `target_fund_id` (String(50)), `amount_thb` (Numeric(12, 2)), `deltas_json` (JSON), `missing_flags_json` (JSON), `data_snapshot_id` (String(50), nullable)
+- Purpose: Log switch preview requests for traceability and demo verification (US-N8)
+- Indexes:
+  - `idx_switch_preview_log_created_at` on (`created_at`) - For querying recent previews
+
+**Migration/Seeding**: Tables created via `Base.metadata.create_all()` in ingestion script (`backend/app/services/ingestion/ingest_funds.py` line 194). Schema migrations handled via `backend/app/services/ingestion/migrate_schema.py` script (adds columns, updates primary keys, creates indexes). AIMC classification columns added via `backend/app/services/ingestion/migrate_aimc_columns.py` script. Switch preview log table created via `backend/app/services/ingestion/migrate_switch_preview_log.py` script. No Alembic migrations present.
 
 ### Business Logic / Domain Services
 
@@ -176,11 +234,17 @@ The application consists of:
 - `list_funds()`: Cursor-based pagination with keyset method, supports nullable sort columns, handles search via Elasticsearch (with SQL fallback), applies filters (AMC, category, risk, fee_band), supports 6 sort options. Returns separate entries for each share class with class name as `fund_id`. Includes AIMC classification fields in response.
 - `_list_funds_elasticsearch()`: Uses Elasticsearch search backend with automatic fallback to SQL when ES index is empty
 - `_list_funds_sql()`: SQL-based search using normalized fields with fallback to raw fields when normalized is NULL
-- `get_fund_by_id()`: Supports lookup by class_abbr_name (e.g., "K-INDIA-A(A)") or proj_id. Returns class name as `fund_id` when class exists. Fetches investment constraints and redemption period from SEC API on-demand. Returns AIMC classification with source indicator.
+- `get_fund_by_id()`: Supports lookup by class_abbr_name (e.g., "K-INDIA-A(A)") or proj_id. Returns class name as `fund_id` when class exists. Fetches investment constraints, redemption period, dividend policy, and fund policy from SEC API on-demand. Returns AIMC classification with source indicator, management style with description, dividend policy, and share class info (proj_id, class_abbr_name). Expense ratio now uses actual value from fee breakdown (matches fund detail page display), falling back to stored `expense_ratio` if fee breakdown unavailable.
 - `_get_investment_constraints()`: Fetches investment constraints (minimum investment, redemption, balance) from SEC API `/fund/{proj_id}/investment` endpoint
 - `_get_redemption_data()`: Fetches redemption period data from SEC API `/fund/{proj_id}/redemption` endpoint
+- `_get_dividend_data()`: Fetches dividend/distribution data from SEC API `/fund/{proj_id}/dividend` endpoint, filters by class
+- `_get_policy_data()`: Fetches fund policy data (policy type, management style) from SEC API `/fund/{proj_id}/policy` endpoint
 - `_format_redemption_period()`: Formats SEC API redemption period codes (1-9, E, T) into human-readable text (e.g., "Every business day", "Monthly")
+- `_format_management_style()`: Formats management style codes (AN → "Active", PN → "Passive (Index-tracking)")
 - `_format_currency_amount()`: Formats currency amounts with thousand separators
+- `get_share_classes()`: Returns all share classes for a fund from SEC API `/fund/{proj_id}/class_fund`, includes dividend policy per class, identifies current class (feature 2.1)
+- `get_fee_breakdown()`: Returns detailed fee breakdown from SEC API `/fund/{proj_id}/fee`, categorizes into Transaction/Recurring sections, includes Max/Actual rates, handles class-specific filtering with contains-based Thai text matching (feature 2.2). Total expense ratio uses calculated value from fee data, no longer falls back to stored `expense_ratio`.
+- `_get_fund_record()`: Helper to find fund ORM record by class_abbr_name or proj_id
 - `get_fund_count()`: Counts active funds (status="RG")
 - `get_categories_with_counts()`: Returns distinct categories with counts using Elasticsearch aggregation (with SQL fallback), ordered by count desc then alphabetically, excludes nulls (US-N3)
 - `get_risks_with_counts()`: Returns distinct risk levels with counts using Elasticsearch aggregation (with SQL fallback), ordered ascending (numeric if possible), excludes nulls (US-N3)
@@ -233,23 +297,34 @@ The application consists of:
 - `group_fees()`: Groups fee rows by category, preserves all fee row fields
 - `select_default_class()`: Deterministic class selection from list of class-specific data (exact match, then prefer fund-level, then alphabetical)
 
+**SwitchService** (`backend/app/services/switch_service.py`)
+- `get_switch_preview()`: Calculates switch impact preview with fee delta, risk change, category change, and constraints delta (US-N8)
+- `_get_expense_ratio_actual()`: Fetches actual expense ratio from SEC API fee breakdown (matches fund detail page logic), prioritizes `actual_value` from "Total Fees & Expenses" row, falls back to `rate`, then stored `expense_ratio`
+- `_fetch_dealing_constraints()`: Fetches dealing constraints (minimums, redemption period, cut-off times) from SEC API for both funds
+- `_calculate_constraints_delta()`: Compares dealing constraints between current and target funds, returns `ConstraintsDelta` with boolean flags for each constraint type
+- `_classify_coverage_and_missing_flags()`: Classifies data coverage (HIGH/MEDIUM/LOW/BLOCKED) and returns per-section missing flags based on data availability
+- Data sources: Fund identity and risk from database, expense ratio from SEC API fee breakdown, dealing constraints from SEC API (`/investment`, `/redemption`), category/AIMC from database
+- Explainability: Returns formulas, assumptions, and disclaimers for all calculations
+
 **SECAPIClient** (`backend/app/utils/sec_api_client.py`)
 - `fetch_redemption()`: Fetches redemption/dealing constraints data from `/fund/{proj_id}/redemption`
 - `fetch_investment()`: Fetches investment constraints (minimums) from `/fund/{proj_id}/investment` (returns array per class)
 - `fetch_dividend()`: Fetches dividend/distribution data from `/fund/{proj_id}/dividend` (returns array per class)
+- `fetch_fees()`: Fetches fee data from `/fund/{proj_id}/fee` (used by switch service for expense ratio calculation)
 
 ### Integrations
 
-**SEC Thailand API** (`backend/app/services/ingestion/ingest_funds.py`, `backend/app/utils/sec_api_client.py`)
+**SEC Thailand API** (`backend/app/services/ingestion/ingest_funds.py`, `backend/app/utils/sec_api_client.py`, `backend/app/services/fund_service.py`)
 - Base URL: `https://api.sec.or.th/FundFactsheet`
 - Endpoints used: 
   - `/fund/amc`, `/fund/amc/{amc_id}`, `/fund/{proj_id}/class_fund` (for share class data) - ingestion
   - `/fund/{proj_id}/suitability` - risk level data (enrichment)
-  - `/fund/{proj_id}/fee` - fee data (enrichment)
+  - `/fund/{proj_id}/fee` - fee data (enrichment, fund detail fee breakdown)
   - `/fund/{proj_id}/redemption` - redemption/dealing constraints (compare feature, fund detail page)
   - `/fund/{proj_id}/investment` - investment minimums (compare feature, fund detail page)
-  - `/fund/{proj_id}/dividend` - distribution/dividend data (compare feature)
+  - `/fund/{proj_id}/dividend` - distribution/dividend data (compare feature, fund detail page, share class display)
   - `/fund/{proj_id}/fund_compare` - AIMC classification code (ingestion)
+  - `/fund/{proj_id}/policy` - fund policy type and management style (fund detail page)
 - Authentication: `Ocp-Apim-Subscription-Key` header from `SEC_FUND_FACTSHEET_API_KEY` env var
 - Configuration: `backend/app/core/config.py` (lines 14-15)
 - `SECAPIClient.fetch_class_fund()`: Fetches share class data for a fund, returns list of class objects with `class_abbr_name` and `class_name`
@@ -257,6 +332,7 @@ The application consists of:
 - `SECAPIClient.fetch_investment()`: Fetches investment constraints (minimum subscription/redemption/balance) per class
 - `SECAPIClient.fetch_dividend()`: Fetches dividend/distribution data (policy, recent dividends) per class
 - `SECAPIClient.fetch_fund_compare()`: Fetches AIMC classification code from SEC API (returns code like "JPEQ", "EG", "USEQ")
+- `SECAPIClient.fetch_policy()`: Fetches fund policy data (fund_policy_type, management_style code) from SEC API
 
 **Elasticsearch** (`backend/app/services/search/elasticsearch_backend.py`)
 - Index: `funds` with custom analyzers for Thai/English text
@@ -305,6 +381,15 @@ The application consists of:
 - Sections: Fund Information, Risk & Suitability, Fees (grouped), Dealing Constraints, Distribution
 - Handles loading, error, and invalid states (redirects if <2 or >3 funds)
 - Displays non-fatal errors in banner
+- Includes "Switch Preview" button that opens `SwitchPreviewPanel` modal/side panel
+
+**SwitchPreviewPanel** (`frontend/components/Compare/SwitchPreviewPanel.tsx`)
+- Inline panel on Compare page for switch impact preview (US-N8)
+- Fund selection: Dropdowns for current and target funds (from compared set)
+- Amount input: Default 100,000 THB with validation
+- Renders preview cards: FeeImpactCard, RiskChangeCard, CategoryChangeCard, ConstraintsDeltaCard, ExplanationCard
+- Handles loading, error, and "blocked" states (when data coverage is BLOCKED)
+- Shows data freshness badge with `as_of_date`
 
 **CompareFundColumn** (`frontend/components/Compare/CompareFundColumn.tsx`)
 - Individual fund column in side-by-side comparison
@@ -328,6 +413,7 @@ The application consists of:
 - AIMC Type displayed in green color with asterisk (*) indicator for SEC_API fallback
 - Compare button: Inline icon button (+ / ✓) in header row next to fund name
 - Links to fund detail page with state preservation
+- Note: Dividend policy and management style badges removed from catalog (require per-fund SEC API calls, impacting list performance). These are displayed on fund detail page only.
 
 **FilterPanel** (`frontend/components/FundCatalog/FilterPanel.tsx`)
 - Sidebar with filter sections: Category, Risk Level, Fees, AMC
@@ -364,9 +450,74 @@ The application consists of:
 
 **KeyFactsCard** (`frontend/components/FundDetail/KeyFactsCard.tsx`)
 - Two-tier layout for fund information display
-- Tier 1 (Fund Classification): Three-column hero grid showing Risk Level (badge), AIMC Type (with fallback indicator), Expense Ratio
+- Tier 1 (Fund Classification): Two-column hero grid showing Risk Level (badge), AIMC Type (with fallback indicator). Expense ratio removed (now in FeeBreakdownCard for consistency with SEC API data)
 - Tier 2 (Investment Requirements): Grid showing Minimum Investment, Minimum Redemption, Minimum Balance, and Redemption Period (when available)
 - Fallback note: Shows indicator when AIMC category is derived from SEC API
+
+**ShareClassCard** (`frontend/components/FundDetail/ShareClassCard.tsx`)
+- Displays current share class info with name and description
+- Lists other available share classes as clickable links
+- Shows dividend policy badge (INC/ACC) per class
+- Hidden when fund has only one share class
+- Feature 2.1 implementation
+
+**FeeBreakdownCard** (`frontend/components/FundDetail/FeeBreakdownCard.tsx`)
+- Fetches fee data from `/funds/{fund_id}/fees` endpoint
+- Displays fees organized by section: Transaction Fees and Recurring Fees
+- Shows both Max (prospectus rate) and Actual (currently charged) values for each fee
+- Displays Total Expense Ratio with Max and Actual values
+- Includes legend explaining Max vs Actual and last update date
+- Feature 2.2 implementation
+
+**FundPolicyCard** (`frontend/components/FundDetail/FundPolicyCard.tsx`)
+- Displays Policy Type (e.g., "Equity", "Fixed Income")
+- Shows AIMC Category with source indicator (Official/Derived)
+- Featured Management Style section with icon (📊 Passive, 🎯 Active), badge, and detailed description explaining implications
+- Hidden when no policy data available
+- Feature 2.3 implementation
+
+**DistributionPolicyCard** (`frontend/components/FundDetail/DistributionPolicyCard.tsx`)
+- Displays dividend policy as Income (Distributing) or Accumulating
+- Shows policy description explaining what each type means
+- Displays additional dividend policy remarks when available
+- Shows hint for accumulating funds about dividend-paying share classes
+- Feature 2.5 implementation
+
+**SwitchPreviewPage** (`frontend/components/Switch/SwitchPreviewPage.tsx`)
+- Standalone switch preview page at `/switch` route (US-N8)
+- Fund selection and amount input interface
+- Renders preview results in grid layout: FeeImpactCard, RiskChangeCard, CategoryChangeCard, ConstraintsDeltaCard, ExplanationCard
+- Displays data freshness badge with `as_of_date`
+- Handles loading, error, and blocked states
+
+**FeeImpactCard** (`frontend/components/Switch/FeeImpactCard.tsx`)
+- Displays annual fee drag difference in THB (rounded to nearest THB)
+- Shows expense ratio delta (target - current) with percentage
+- Displays formula: `Amount × (Target ER − Current ER)`
+- Shows "Not available" when expense ratio data missing
+
+**RiskChangeCard** (`frontend/components/Switch/RiskChangeCard.tsx`)
+- Displays risk level change as integer delta (target - current)
+- Shows risk level badges for current and target funds
+- Indicates increase, decrease, or no change
+- Shows "Not available" when risk level data missing
+
+**CategoryChangeCard** (`frontend/components/Switch/CategoryChangeCard.tsx`)
+- Displays category/AIMC type change as boolean flag
+- Shows category names for current and target funds
+- Indicates change or no change
+- Shows "Not available" when category data missing
+
+**ConstraintsDeltaCard** (`frontend/components/Switch/ConstraintsDeltaCard.tsx`)
+- Displays dealing constraints differences (US-N8)
+- Shows changes for: minimum subscription, minimum redemption, minimum balance, redemption period, cut-off times
+- Grid layout with status indicators (Changed, Same, Not available)
+- Shows "Not available" when constraints data missing
+
+**ExplanationCard** (`frontend/components/Switch/ExplanationCard.tsx`)
+- Displays explainability information: formulas, assumptions, disclaimers
+- Shows calculation methodology for each metric
+- Includes data coverage status (HIGH/MEDIUM/LOW/BLOCKED)
 
 ### State Management
 
@@ -382,17 +533,25 @@ The application consists of:
 **API Client** (`frontend/utils/api/funds.ts`)
 - `fetchFunds()`: Calls `/funds` endpoint with query params
 - `fetchFundCount()`: Calls `/funds/count` endpoint
+- `fetchFundDetail()`: Calls `/funds/{fund_id}` endpoint, returns `FundDetail`
 - `fetchCategories()`: Calls `/funds/categories` endpoint, returns `CategoryListResponse` (US-N3)
 - `fetchRisks()`: Calls `/funds/risks` endpoint, returns `RiskListResponse` (US-N3)
 - `fetchAMCs()`: Calls `/funds/amcs` endpoint with optional search, limit, and cursor params, returns `AMCListResponse` (US-N3)
 - `fetchCompareFunds()`: Calls `/funds/compare` endpoint with fund IDs array, validates 2-3 funds, returns `CompareFundsResponse`
+- `fetchShareClasses()`: Calls `/funds/{fund_id}/share-classes` endpoint, returns `ShareClassListResponse` (feature 2.1)
+- `fetchFeeBreakdown()`: Calls `/funds/{fund_id}/fees` endpoint, returns `FeeBreakdownResponse` (feature 2.2)
 - Uses `NEXT_PUBLIC_API_URL` env var (defaults to `http://localhost:8000`)
 - Real API integration (not mocked)
+
+**Switch API Client** (`frontend/utils/api/switch.ts`)
+- `fetchSwitchPreview()`: Calls `POST /switch/preview` endpoint with `SwitchPreviewRequest`, returns `SwitchPreviewResponse` (US-N8)
+- Validates request parameters (different funds, positive amount)
+- Handles error responses (400, 404, 500)
 
 ### Navigation/Routing
 
 - Next.js App Router with file-based routing
-- Routes: `/` (home), `/funds` (catalog), `/funds/[fundId]` (detail), `/compare` (compare page)
+- Routes: `/` (home), `/funds` (catalog), `/funds/[fundId]` (detail), `/compare` (compare page), `/switch` (switch preview page)
 - Client-side navigation via Next.js `Link` component
 - URL-first state management for compare selection (shareable URLs)
 
@@ -476,6 +635,8 @@ docker-compose up --build
   - `TestCompareFunds`: Success with 2-3 funds, validation (too many/few), duplicate handling, whitespace trimming, order preservation, error handling (404, 500, validation errors)
   - `TestCategorizeFee`: Front-end/back-end/switching/ongoing/other keyword recognition, case-insensitive matching, partial keyword matching
   - `TestGroupFees`: Fee grouping by category, empty list handling, field preservation
+  - `TestSwitchPreview`: Success cases, validation (same funds, invalid amount), missing data handling, constraints delta calculation, coverage classification, error handling (404, 500) (US-N8)
+  - `TestSwitchService`: Expense ratio calculation from SEC API, constraints delta logic, coverage classification, missing flags (US-N8)
 - Mocking: Uses `unittest.mock` to mock services
 - Test client: httpx `AsyncClient` with `ASGITransport`
 
@@ -544,7 +705,7 @@ No coverage tools or reports found in codebase.
 **API Endpoints**:
 - Individual fund detail endpoint exists (`GET /funds/{fund_id}`) - supports lookup by class name or proj_id
 - Fund comparison endpoint exists (`GET /funds/compare`) - accepts 2-3 fund IDs, returns side-by-side comparison data with fees, risk, dealing constraints, and distribution
-- No switch impact simulation endpoint (core product feature)
+- Switch impact preview endpoint exists (`POST /switch/preview`) - accepts current/target fund IDs and amount, returns calculated deltas, explainability, and coverage status (US-N8)
 
 **Business Logic**:
 - Category inference is keyword-based only, may miss funds
@@ -628,9 +789,19 @@ Not applicable.
 
 16. **[DONE] Implement fund comparison feature (US-N6)**: Created CompareService, compare API endpoint, fee grouping utility, compare data models, frontend CompareTray component, compare page with side-by-side layout, compare state hook with URL-first approach, "Add to Compare" buttons on FundCard and FundDetailView. Backend tests (26/26 passing) cover compare endpoint and fee grouping. Verified by adding 2-3 funds to compare, viewing side-by-side comparison with fees grouped by category, dealing constraints, and distribution data.
 
+20. **[DONE] Implement Switch Impact Preview (US-N8)**: Created SwitchService with expense ratio calculation from SEC API fee breakdown (matches fund detail page), constraints delta calculation, coverage classification, and per-section missing flags. Backend endpoint `POST /switch/preview` returns calculated deltas, explainability, and coverage status. Frontend components: SwitchPreviewPage (standalone route), SwitchPreviewPanel (inline on Compare page), FeeImpactCard, RiskChangeCard, CategoryChangeCard, ConstraintsDeltaCard, ExplanationCard. Database table `switch_preview_log` for request traceability. Migration script `migrate_switch_preview_log.py` creates log table. Verified by navigating to compare page, clicking "Switch Preview", selecting funds and amount, viewing preview with fee impact, risk change, category change, and constraints differences. Expense ratio fix: Uses actual expense ratio from SEC API fee breakdown (actual_value from "Total Fees & Expenses" row), ensuring consistency with fund detail page display.
+
 17. **Full re-ingestion for share classes**: Run ingestion script to populate class data for all funds with share classes. Verify by checking database has separate records for funds with multiple classes.
 
 18. **Cleanup base fund records**: Remove base fund records (with empty `class_abbr_name`) for funds that have share classes. Verify by checking no duplicate entries in fund list.
+
+19. **[DONE] Fund Detail Enhancements (Features 2.1, 2.2, 2.3, 2.5)**: Implemented based on SEC API data analysis (`backend/fund_data_analysis_SCBNK225E.md`):
+    - **2.1 Share Class Display**: New ShareClassCard showing current class, sibling classes with navigation links, dividend policy badges (INC/ACC). Backend endpoint `GET /funds/{fund_id}/share-classes` returns classes from SEC API.
+    - **2.2 Detailed Fee Breakdown**: New FeeBreakdownCard showing fees by section (Transaction/Recurring), with Max (prospectus) and Actual (charged) values, Total Expense Ratio. Backend endpoint `GET /funds/{fund_id}/fees` with contains-based Thai text matching for fee categorization.
+    - **2.3 Investment Strategy Display**: New FundPolicyCard with Policy Type, AIMC Category (with source indicator), and Management Style with description (Passive: "tracks index, lower fees" / Active: "managers select investments, higher fees").
+    - **2.5 Distribution Policy**: New DistributionPolicyCard showing Income/Accumulating classification with explanatory descriptions.
+    - **Expense Ratio Consistency Fix**: Removed duplicate expense ratio from KeyFactsCard (was showing database value), consolidated in FeeBreakdownCard (shows SEC API values). KeyFactsCard grid changed from 3 to 2 columns.
+    - Verified by viewing fund detail page showing all new cards with data from SEC API.
 
 ## 12. Appendix: Evidence Index
 
@@ -651,8 +822,11 @@ Not applicable.
 - `backend/app/utils/sec_api_client.py` - SEC API client with `fetch_class_fund()` method for share class data and `fetch_fund_compare()` for AIMC codes
 - `backend/app/services/ingestion/enrich_funds.py` - Fund enrichment service (risk level and expense ratio with class-specific support)
 - `backend/app/services/compare_service.py` - Compare service aggregating fund comparison data (US-N6)
+- `backend/app/services/switch_service.py` - Switch impact preview service with expense ratio calculation, constraints delta, and coverage classification (US-N8)
 - `backend/app/utils/fee_grouping.py` - Fee categorization and grouping utility (US-N6)
-- `backend/app/models/fund.py` - Pydantic request/response schemas (includes CategoryItem, RiskItem, AMCItem, CategoryListResponse, RiskListResponse, AMCListResponse for US-N3, CompareFundsResponse, CompareFundData, FeeGroup, DealingConstraints, DistributionData for US-N6, AIMC classification fields and investment constraints for FundDetail and FundSummary)
+- `backend/app/models/fund.py` - Pydantic request/response schemas (includes CategoryItem, RiskItem, AMCItem, CategoryListResponse, RiskListResponse, AMCListResponse for US-N3, CompareFundsResponse, CompareFundData, FeeGroup, DealingConstraints, DistributionData for US-N6, SwitchPreviewRequest, SwitchPreviewResponse, ConstraintsDelta, SwitchPreviewMissingFlags, Deltas, Explainability, Coverage for US-N8, AIMC classification fields and investment constraints for FundDetail and FundSummary, ShareClassInfo, ShareClassListResponse, FeeBreakdownItem, FeeBreakdownSection, FeeBreakdownResponse for fund detail enhancements)
+- `backend/app/api/switch.py` - Switch impact preview API endpoint (US-N8)
+- `backend/app/services/ingestion/migrate_switch_preview_log.py` - Migration script for switch preview log table (US-N8)
 - `backend/app/core/config.py` - Application configuration (includes Elasticsearch settings)
 - `backend/app/core/database.py` - Database connection and session management
 - `backend/app/core/elasticsearch.py` - Elasticsearch client initialization
@@ -660,6 +834,8 @@ Not applicable.
 - `backend/tests/test_filter_metadata_api.py` - Filter metadata endpoint tests (US-N3)
 - `backend/tests/test_compare_api.py` - Compare endpoint tests (US-N6)
 - `backend/tests/test_fee_grouping.py` - Fee grouping utility tests (US-N6)
+- `backend/tests/test_switch_api.py` - Switch preview API endpoint tests (US-N8)
+- `backend/tests/test_switch_service.py` - Switch service business logic tests (US-N8)
 - `backend/tests/conftest.py` - Pytest configuration
 - `backend/requirements.txt` - Python dependencies (includes elasticsearch, aiohttp)
 - `backend/Dockerfile` - Backend container definition
@@ -669,6 +845,7 @@ Not applicable.
 - `frontend/app/funds/page.tsx` - Fund catalog page
 - `frontend/app/funds/[fundId]/page.tsx` - Fund detail page with URL decoding
 - `frontend/app/compare/page.tsx` - Compare page (US-N6)
+- `frontend/app/switch/page.tsx` - Switch preview page (US-N8)
 - `frontend/app/layout.tsx` - Root layout (includes CompareTray component)
 - `frontend/components/FundCatalog/FundCatalog.tsx` - Main catalog component with search results label
 - `frontend/components/FundCatalog/useFundCatalog.ts` - Catalog state management hook with clearSearch
@@ -677,16 +854,30 @@ Not applicable.
 - `frontend/components/FundCatalog/SearchInput.tsx` - Search input component
 - `frontend/components/FundCatalog/EmptyState.tsx` - Search-specific and generic empty states
 - `frontend/components/FundCatalog/FundCard.tsx` - Fund card component with AIMC Type display and inline compare button
-- `frontend/components/FundDetail/FundDetailView.tsx` - Main fund detail view component
-- `frontend/components/FundDetail/KeyFactsCard.tsx` - Two-tier fund information display (Classification and Investment Requirements)
+- `frontend/components/FundDetail/FundDetailView.tsx` - Main fund detail view component with card-based layout
+- `frontend/components/FundDetail/KeyFactsCard.tsx` - Two-tier fund information display (Classification with 2-column grid, Investment Requirements)
 - `frontend/components/FundDetail/FreshnessBadge.tsx` - Data freshness badge component
+- `frontend/components/FundDetail/ShareClassCard.tsx` - Share class navigation and display (feature 2.1)
+- `frontend/components/FundDetail/FeeBreakdownCard.tsx` - Detailed fee breakdown with Max/Actual values (feature 2.2)
+- `frontend/components/FundDetail/FundPolicyCard.tsx` - Investment strategy and management style display (feature 2.3)
+- `frontend/components/FundDetail/DistributionPolicyCard.tsx` - Dividend/distribution policy display (feature 2.5)
+- `frontend/components/FundDetail/index.ts` - Barrel exports for FundDetail components
 - `frontend/components/Compare/CompareTray.tsx` - Persistent compare tray component (US-N6)
 - `frontend/components/Compare/ComparePage.tsx` - Main compare page component (US-N6)
 - `frontend/components/Compare/CompareFundColumn.tsx` - Individual fund column in comparison (US-N6)
 - `frontend/components/Compare/CompareSection.tsx` - Reusable section wrapper component (US-N6)
 - `frontend/components/Compare/useCompareState.ts` - URL-first compare state management hook (US-N6)
+- `frontend/components/Compare/SwitchPreviewPanel.tsx` - Inline switch preview panel on Compare page (US-N8)
+- `frontend/components/Switch/SwitchPreviewPage.tsx` - Standalone switch preview page component (US-N8)
+- `frontend/components/Switch/FeeImpactCard.tsx` - Fee impact display card (US-N8)
+- `frontend/components/Switch/RiskChangeCard.tsx` - Risk level change display card (US-N8)
+- `frontend/components/Switch/CategoryChangeCard.tsx` - Category change display card (US-N8)
+- `frontend/components/Switch/ConstraintsDeltaCard.tsx` - Dealing constraints differences display card (US-N8)
+- `frontend/components/Switch/ExplanationCard.tsx` - Explainability information display card (US-N8)
 - `frontend/utils/api/funds.ts` - API client functions (includes fetchCompareFunds for US-N6)
-- `frontend/types/fund.ts` - TypeScript type definitions (includes CompareFundsResponse, CompareFundData, FeeGroup, DealingConstraints, DistributionData for US-N6, AIMC classification fields and investment constraints for FundDetail and FundSummary)
+- `frontend/utils/api/switch.ts` - Switch API client functions (includes fetchSwitchPreview for US-N8)
+- `frontend/types/fund.ts` - TypeScript type definitions (includes CompareFundsResponse, CompareFundData, FeeGroup, DealingConstraints, DistributionData for US-N6, AIMC classification fields and investment constraints for FundDetail and FundSummary, ShareClassInfo, ShareClassListResponse, FeeBreakdownItem, FeeBreakdownSection, FeeBreakdownResponse for fund detail enhancements)
+- `frontend/types/switch.ts` - TypeScript type definitions for switch preview (SwitchPreviewRequest, SwitchPreviewResponse, ConstraintsDelta, SwitchPreviewMissingFlags, Deltas, Explainability, Coverage for US-N8)
 - `frontend/package.json` - Node.js dependencies and scripts
 
 ### Configuration Files
@@ -702,6 +893,7 @@ Not applicable.
 - `docs/user_story/us-n5.md` - User story N5: Home page funnel
 - `docs/user_story/us-n6.md` - User story N6: Compare tray and side-by-side comparison
 - `docs/user_story/us-n6-manual-verification.md` - Manual verification steps for compare feature
+- `docs/user_story/us-n8.md` - User story N8: Switch Impact Preview v1 (Explainable, Constrained, Demo-Ready)
 - `docs/share_class_implementation_plan.md` - Share class implementation plan and approach
 - `docs/architecture_recommendations.md` - Architecture guidance
 
