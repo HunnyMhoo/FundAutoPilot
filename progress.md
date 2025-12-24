@@ -46,6 +46,51 @@ The application consists of:
   - Most funds show "Unknown" for hedge flag (hedge keywords not present in AIMC category names)
   - Distribution policy missing for some funds (SEC API data unavailable)
 
+### Peer Group Statistics Computation (US-N11)
+- **What it does**: Precomputes peer group statistics (count, median, percentiles, distribution) for all peer groups and horizons (1y, 3y, 5y, ytd). Stores results in `peer_stats` table for fast peer ranking queries. Each share class is counted separately in peer groups and contributes independently to statistics. NULL returns are excluded from all statistics.
+- **Where it lives**: 
+  - Backend: `backend/app/models/fund_orm.py` (PeerStats ORM model), `backend/app/services/peer_group_service.py` (peer group membership queries), `backend/app/services/peer_stats_service.py` (stats computation and storage), `backend/app/services/peer_stats_computation_service.py` (nightly batch computation), `backend/app/services/ingestion/migrate_peer_stats.py` (migration script)
+- **How to verify**: 
+  - Run computation service: `python -m app.services.peer_stats_computation_service`
+  - Check `peer_stats` table contains entries for peer keys with return data
+  - Verify `peer_count_total` and `peer_count_eligible` match expected counts
+  - Verify `stats_json` contains full returns list and fund/class identifiers in `proj_id|class_abbr_name` format
+  - Check database for unique constraint `uq_peer_stats` on `(peer_key, horizon, as_of_date)`
+- **Current limitations**: 
+  - Requires return snapshot data (US-N10) to be populated first
+  - Stats only computed for peer keys with active funds and return data
+  - Nightly computation job must be scheduled separately
+
+### Peer Ranking Service (US-N12)
+- **What it does**: Computes peer-relative rankings (percentile, rank, quartile) on-demand from precomputed peer stats. Selects representative share class for browse display using deterministic scoring (coverage, fee, history). Handles unavailable rankings with clear reasons (insufficient peer set, missing data, etc.). Minimum peer count thresholds: 10 (hard minimum), 15 (recommended).
+- **Where it lives**: 
+  - Backend: `backend/app/services/peer_ranking_service.py` (ranking computation), `backend/app/services/representative_class_service.py` (representative class selection), `backend/app/models/peer_ranking.py` (Pydantic models), `backend/app/services/fund_service.py` (integration in `_fetch_peer_ranks`)
+- **How to verify**: 
+  - Compute peer rank for a fund with ≥10 peers: `PeerRankingService.compute_peer_rank(fund_id, "1y", as_of_date)`
+  - Verify percentile (0-100, higher is better), rank (1..n, 1 is best), quartile (Q1-Q4) are correct
+  - Verify representative class selection uses deterministic scoring
+  - Check unavailable rankings return clear reasons when insufficient peers or missing data
+- **Current limitations**: 
+  - Requires peer stats (US-N11) to be precomputed first
+  - On-demand computation (not precomputed per fund/class)
+  - Representative class selection may not match user preference
+
+### Browse Card Peer Rank Display (US-N13)
+- **What it does**: Displays peer-relative performance on fund cards in browse/catalog view. Shows peer rank badge ("Top X% of peers (1Y, n=72)") when available. Gracefully degrades when insufficient peers (<10) or missing data. Uses representative class for peer ranking computation.
+- **Where it lives**: 
+  - Backend: `backend/app/services/fund_service.py` (includes `peer_rank`, `trailing_1y_return`, `ytd_return` in FundSummary response)
+  - Frontend: `frontend/components/FundCatalog/FundCard.tsx` (peer rank badge display), `frontend/utils/peerRankUtils.ts` (formatting utilities), `frontend/types/peer.ts` (TypeScript types), `frontend/public/validate-peer-stats.html` (manual validation page)
+- **How to verify**: 
+  - Navigate to `/funds` page and check fund cards show peer rank badges for funds with ≥10 peers
+  - Verify badge format: "Top X% of peers (1Y, n=Y)" or "Xth percentile of peers (1Y, n=Y)"
+  - Check funds with <10 peers or missing data do not show peer rank (graceful degradation)
+  - Use validation page at `/validate-peer-stats.html` to inspect raw peer rank data
+  - Check API response includes `peer_rank`, `trailing_1y_return`, `ytd_return` fields
+- **Current limitations**: 
+  - Only shows 1Y horizon on browse cards (3Y, 5Y, YTD not displayed)
+  - Peer rank computed on-demand (may impact API response time for large lists)
+  - Representative class selection may not match user preference
+
 ### Fund Detail Page
 - **What it does**: Displays comprehensive fund information including fund classification (Risk Level, AIMC Type), investment requirements, share class navigation, fee breakdown, investment strategy, and distribution policy. Multi-card layout with data fetched from SEC API.
 - **Where it lives**: 
@@ -219,6 +264,8 @@ The application consists of:
 - Normalized search fields: `fund_name_norm`, `fund_abbr_norm` (populated during ingestion)
 - AIMC classification: `aimc_category` stores display category name, `aimc_code` stores raw SEC API code, `aimc_category_source` indicates source ('AIMC_CSV' or 'SEC_API')
 - Peer classification (US-N9): `peer_focus` is exact copy of `aimc_category`, `peer_currency` extracted from SEC API (defaults to "THB"), `peer_fx_hedged_flag` from AIMC category keywords ("Hedged", "Unhedged", "Mixed", "Unknown"), `peer_distribution_policy` from SEC API ("D" or "A"), `peer_key` composite key format: `AIMC_TYPE|FOCUS|CURRENCY|HEDGE|DIST`, `peer_key_fallback_level` tracks missing dimensions (0=full, 1=missing dist, 2=missing hedge, 3=AIMC-only)
+- `fund_return_snapshot` (`backend/app/models/fund_orm.py` lines 137-168): Stores historical return snapshots per fund/class combination. Primary key: `(proj_id, class_abbr_name, as_of_date)`. Fields: `trailing_1y_return`, `trailing_3y_return`, `trailing_5y_return`, `ytd_return`, `eligible_1y`, `eligible_3y`, `eligible_5y`, `as_of_date`. Used for peer ranking and performance analysis.
+- `peer_stats` (`backend/app/models/fund_orm.py` lines 169-204): Stores precomputed peer group statistics (US-N11). Primary key: `(peer_key, horizon, as_of_date)`. Fields: `peer_count_total`, `peer_count_eligible`, `peer_median_return`, `peer_p25_return`, `peer_p75_return`, `stats_json` (contains full returns list and fund/class identifiers), `computed_at`. Unique constraint: `uq_peer_stats` on `(peer_key, horizon, as_of_date)`. Indexes: `(peer_key, horizon, as_of_date DESC)`, `(as_of_date DESC)`.
 - Share class support: Funds with multiple share classes (e.g., K-INDIA-A(A), K-INDIA-A(D)) are stored as separate records with same `proj_id` but different `class_abbr_name`. Class name used as `fund_abbr` and `fund_id` in API responses.
 - Indexes:
   - `idx_fund_name_asc` on (`fund_name_en`, `proj_id`)
@@ -246,12 +293,13 @@ The application consists of:
 - Indexes:
   - `idx_switch_preview_log_created_at` on (`created_at`) - For querying recent previews
 
-**Migration/Seeding**: Tables created via `Base.metadata.create_all()` in ingestion script (`backend/app/services/ingestion/ingest_funds.py` line 194). Schema migrations handled via `backend/app/services/ingestion/migrate_schema.py` script (adds columns, updates primary keys, creates indexes). AIMC classification columns added via `backend/app/services/ingestion/migrate_aimc_columns.py` script. Peer classification columns added via `backend/app/services/ingestion/migrate_peer_classification_columns.py` script (US-N9). Switch preview log table created via `backend/app/services/ingestion/migrate_switch_preview_log.py` script. No Alembic migrations present.
+**Migration/Seeding**: Tables created via `Base.metadata.create_all()` in ingestion script (`backend/app/services/ingestion/ingest_funds.py` line 194). Schema migrations handled via `backend/app/services/ingestion/migrate_schema.py` script (adds columns, updates primary keys, creates indexes). AIMC classification columns added via `backend/app/services/ingestion/migrate_aimc_columns.py` script. Peer classification columns added via `backend/app/services/ingestion/migrate_peer_classification_columns.py` script (US-N9). Switch preview log table created via `backend/app/services/ingestion/migrate_switch_preview_log.py` script. Peer stats table created via `backend/app/services/ingestion/migrate_peer_stats.py` script (US-N11). No Alembic migrations present.
 
 ### Business Logic / Domain Services
 
 **FundService** (`backend/app/services/fund_service.py`)
-- `list_funds()`: Cursor-based pagination with keyset method, supports nullable sort columns, handles search via Elasticsearch (with SQL fallback), applies filters (AMC, category, risk, fee_band), supports 6 sort options. Returns separate entries for each share class with class name as `fund_id`. Includes AIMC classification fields and `peer_focus` in response (US-N9, US-N13).
+- `list_funds()`: Cursor-based pagination with keyset method, supports nullable sort columns, handles search via Elasticsearch (with SQL fallback), applies filters (AMC, category, risk, fee_band), supports 6 sort options. Returns separate entries for each share class with class name as `fund_id`. Includes AIMC classification fields, `peer_focus`, `peer_rank`, `trailing_1y_return`, and `ytd_return` in response (US-N9, US-N12, US-N13).
+- `_fetch_peer_ranks()`: Fetches peer ranks for a list of funds using representative class selection (US-N12, US-N13). Uses RepresentativeClassService to select representative class for each fund, then computes peer ranks using PeerRankingService. Returns dictionary mapping proj_id to PeerRank or None.
 - `_list_funds_elasticsearch()`: Uses Elasticsearch search backend with automatic fallback to SQL when ES index is empty
 - `_list_funds_sql()`: SQL-based search using normalized fields with fallback to raw fields when normalized is NULL
 - `get_fund_by_id()`: Supports lookup by class_abbr_name (e.g., "K-INDIA-A(A)") or proj_id. Returns class name as `fund_id` when class exists. Fetches investment constraints, redemption period, dividend policy, and fund policy from SEC API on-demand. Returns AIMC classification with source indicator, management style with description, dividend policy, and share class info (proj_id, class_abbr_name). Expense ratio now uses actual value from fee breakdown (matches fund detail page display), falling back to stored `expense_ratio` if fee breakdown unavailable.
@@ -316,6 +364,40 @@ The application consists of:
 - `classify_all_funds()`: Bulk classification with batch processing and statistics collection
 - Coverage: ~80% of funds (4,391/5,509) have peer_key populated
 - Currency handling: Detects and converts numeric currency codes (e.g., "0102500166") to "THB"
+
+**PeerGroupService** (`backend/app/services/peer_group_service.py`)
+- `get_peer_group_members()`: Returns all active fund/class combinations with matching `peer_key` (US-N11)
+- Filters to `fund_status = 'RG'` and fund/class combinations with return snapshots at or before as-of date
+- Each share class is counted separately in peer groups
+- Uses explicit inner join for efficient querying
+
+**PeerStatsService** (`backend/app/services/peer_stats_service.py`)
+- `compute_peer_stats()`: Computes peer group statistics (count, median, percentiles) for a peer key and horizon (US-N11)
+- `store_peer_stats()`: Stores computed stats in `peer_stats` table with `on_conflict_do_update` for idempotency
+- `get_latest_peer_stats()`: Retrieves latest peer stats for a peer key and horizon as of a specific date
+- Handles NULL returns exclusion and eligibility filtering per horizon
+- Stats JSON structure includes full returns list and fund/class identifiers in `proj_id|class_abbr_name` format
+
+**PeerStatsComputationService** (`backend/app/services/peer_stats_computation_service.py`)
+- `compute_all_peer_stats()`: Nightly batch computation of peer stats for all peer keys and horizons (US-N11)
+- Processes all unique `peer_key` values in Fund table
+- Computes stats for horizons: "1y", "3y", "5y", "ytd"
+- Transaction management: commits after each successful store, rolls back on error to prevent cascading failures
+- Returns statistics: `{peer_keys_processed, stats_computed, insufficient_count, errors}`
+- Idempotent: can re-run safely
+
+**PeerRankingService** (`backend/app/services/peer_ranking_service.py`)
+- `compute_peer_rank()`: Computes peer-relative ranking (percentile, rank, quartile) for a single fund/class (US-N12)
+- `compute_peer_ranks_batch()`: Batch computation for multiple funds with caching of peer stats lookups
+- Handles unavailable rankings with clear reasons (insufficient peer set, missing data, etc.)
+- Minimum peer count thresholds: 10 (hard minimum), 15 (recommended)
+- Returns `PeerRankResult` with percentile (0-100, higher is better), rank (1..n, 1 is best), quartile (Q1-Q4), peer counts, and median
+
+**RepresentativeClassService** (`backend/app/services/representative_class_service.py`)
+- `select_representative_class()`: Selects representative share class for browse display using deterministic scoring (US-N12)
+- `select_representative_classes_batch()`: Batch selection for multiple funds
+- Scoring components: coverage (fee + NAV history, 40%), fee (lower expense ratio, 30%), history (eligible horizons, 30%)
+- Returns `class_abbr_name` of representative class, or None if fund not found
 
 **CompareService** (`backend/app/services/compare_service.py`)
 - `compare_funds()`: Aggregates comparison data for 2-3 funds, fetches data from database and SEC API, applies class selection logic, groups fees into categories, structures response with missing flags and data freshness
@@ -443,7 +525,8 @@ The application consists of:
 - Displays individual fund summary (name, AMC, category, risk, AIMC type)
 - Two-column grid: Risk and AIMC Type (Fee column removed)
 - AIMC Type displayed in green color with asterisk (*) indicator for SEC_API fallback
-- Category display: Uses `formatCategoryLabel()` to display AIMC category with focus (US-N13 partial, peer_focus is same as aimc_category per US-N9)
+- Category display: Uses `formatCategoryLabel()` to display AIMC category with focus (US-N13, peer_focus is same as aimc_category per US-N9)
+- Peer rank display: Shows peer rank badge ("Top X% of peers (1Y, n=72)") when available (US-N13). Uses `formatPeerRankForCard()` and `isPeerRankAvailable()` utilities. Gracefully degrades when insufficient peers (<10) or missing data.
 - Compare button: Inline icon button (+ / ✓) in header row next to fund name
 - Links to fund detail page with state preservation
 - Note: Dividend policy and management style badges removed from catalog (require per-fund SEC API calls, impacting list performance). These are displayed on fund detail page only.
@@ -564,7 +647,7 @@ The application consists of:
 ### API Wiring
 
 **API Client** (`frontend/utils/api/funds.ts`)
-- `fetchFunds()`: Calls `/funds` endpoint with query params, returns `FundListResponse` with `peer_focus` field (US-N9, US-N13)
+- `fetchFunds()`: Calls `/funds` endpoint with query params, returns `FundListResponse` with `peer_focus`, `peer_rank`, `trailing_1y_return`, and `ytd_return` fields (US-N9, US-N12, US-N13)
 - `fetchFundCount()`: Calls `/funds/count` endpoint
 - `fetchFundDetail()`: Calls `/funds/{fund_id}` endpoint, returns `FundDetail`
 - `fetchCategories()`: Calls `/funds/categories` endpoint, returns `CategoryListResponse` (US-N3)
@@ -826,6 +909,12 @@ Not applicable.
 
 21. **[DONE] Implement Peer Group Classification (US-N9)**: Created database migration script adding 6 peer classification fields to Fund table (`peer_focus`, `peer_currency`, `peer_fx_hedged_flag`, `peer_distribution_policy`, `peer_key`, `peer_key_fallback_level`). Created PeerClassificationService with methods to compute peer focus (exact copy of aimc_category), currency (from SEC API, defaults to THB), hedge flag (from AIMC category keywords), distribution policy (from SEC API dividend endpoint), and peer key (composite format: `AIMC_TYPE|FOCUS|CURRENCY|HEDGE|DIST`). Created bulk re-classification script `reclassify_all_funds.py` with batch processing and statistics. Created currency code fix script to handle numeric codes from SEC API. Updated FundService to include `peer_focus` in API response. Updated frontend types and FundCard component to display category (US-N13 partial). Created unit tests for PeerClassificationService. Coverage: ~80% of funds (4,391/5,509) have peer_key populated. Verified by running bulk classification script and checking database with validation queries. Currency fix: Detects and converts numeric currency codes (e.g., "0102500166") to "THB".
 
+22. **[DONE] Implement Peer Group Computation Engine (US-N11)**: Created `peer_stats` table with schema for storing precomputed peer group statistics (count, median, percentiles, distribution). Created PeerStatsService for computing and storing peer stats with `on_conflict_do_update` for idempotency. Created PeerStatsComputationService for nightly batch computation of all peer stats across all peer keys and horizons (1y, 3y, 5y, ytd). Each share class is counted separately in peer groups and contributes independently to statistics. NULL returns are excluded from all statistics. Transaction management implemented with commit after each successful store and rollback on error to prevent cascading failures. Database migration script `migrate_peer_stats.py` creates table with unique constraint `(peer_key, horizon, as_of_date)`. Stats JSON structure includes full returns list and fund/class identifiers in `proj_id|class_abbr_name` format. Verified by running computation service and checking database for peer stats entries.
+
+23. **[DONE] Implement Peer Ranking Service (US-N12)**: Created PeerRankingService for computing peer-relative rankings (percentile, rank, quartile) on-demand from precomputed peer stats. Supports single fund and batch computation. Created RepresentativeClassService for selecting representative share class for browse display using deterministic scoring (coverage, fee, history). Created PeerRankResult and PeerRank Pydantic models for API responses. Handles unavailable rankings with clear reasons (insufficient peer set, missing data, etc.). Minimum peer count thresholds: 10 (hard minimum), 15 (recommended). Updated FundService `_fetch_peer_ranks` to use representative classes for browse display. Verified by computing peer ranks for funds with sufficient peers and checking percentile/rank/quartile values.
+
+24. **[DONE] Implement Browse Card Peer Rank Display (US-N13)**: Created frontend utility functions in `peerRankUtils.ts` for formatting peer rank data (`formatPeerRankForCard`, `isPeerRankAvailable`, `formatCategoryLabel`, `formatReturn`). Updated FundService to include `peer_rank`, `trailing_1y_return`, and `ytd_return` in FundSummary API response. FundCard component already displays peer rank badge ("Top X% of peers (1Y, n=72)") when available. Created validation page `validate-peer-stats.html` for manual verification of peer stats. Peer rank display gracefully degrades when insufficient peers (<10) or missing data. Verified by checking fund catalog shows peer rank badges for funds with ≥10 peers.
+
 17. **Full re-ingestion for share classes**: Run ingestion script to populate class data for all funds with share classes. Verify by checking database has separate records for funds with multiple classes.
 
 18. **Cleanup base fund records**: Remove base fund records (with empty `class_abbr_name`) for funds that have share classes. Verify by checking no duplicate entries in fund list.
@@ -860,6 +949,13 @@ Not applicable.
 - `backend/scripts/fix_peer_currency_codes.py` - Script to fix numeric currency codes (US-N9)
 - `backend/scripts/validate_peer_classification.sql` - SQL validation queries for peer classification data (US-N9)
 - `backend/tests/test_peer_classification_service.py` - Unit tests for peer classification service (US-N9)
+- `backend/app/services/ingestion/migrate_peer_stats.py` - Migration script for peer_stats table (US-N11)
+- `backend/app/services/peer_group_service.py` - Peer group membership queries (US-N11)
+- `backend/app/services/peer_stats_service.py` - Peer stats computation and storage service (US-N11)
+- `backend/app/services/peer_stats_computation_service.py` - Nightly batch computation service for all peer stats (US-N11)
+- `backend/app/services/peer_ranking_service.py` - Peer ranking computation service (US-N12)
+- `backend/app/services/representative_class_service.py` - Representative class selection service (US-N12)
+- `backend/app/models/peer_ranking.py` - Pydantic models for peer ranking results (PeerRankResult, PeerRank, UnavailableReason for US-N12)
 - `backend/app/utils/sec_api_client.py` - SEC API client with `fetch_class_fund()` method for share class data and `fetch_fund_compare()` for AIMC codes
 - `backend/app/services/ingestion/enrich_funds.py` - Fund enrichment service (risk level and expense ratio with class-specific support)
 - `backend/app/services/compare_service.py` - Compare service aggregating fund comparison data (US-N6)
@@ -895,7 +991,8 @@ Not applicable.
 - `frontend/components/FundCatalog/FilterSection.tsx` - Filter section component with conditional title rendering
 - `frontend/components/FundCatalog/SearchInput.tsx` - Search input component
 - `frontend/components/FundCatalog/EmptyState.tsx` - Search-specific and generic empty states
-- `frontend/components/FundCatalog/FundCard.tsx` - Fund card component with AIMC Type display and inline compare button
+- `frontend/components/FundCatalog/FundCard.tsx` - Fund card component with AIMC Type display, peer rank badge, and inline compare button (US-N13)
+- `frontend/public/validate-peer-stats.html` - Manual validation page for peer stats (US-N11, US-N13)
 - `frontend/components/FundDetail/FundDetailView.tsx` - Main fund detail view component with card-based layout
 - `frontend/components/FundDetail/KeyFactsCard.tsx` - Two-tier fund information display (Classification with 2-column grid, Investment Requirements)
 - `frontend/components/FundDetail/FreshnessBadge.tsx` - Data freshness badge component
@@ -918,7 +1015,9 @@ Not applicable.
 - `frontend/components/Switch/ExplanationCard.tsx` - Explainability information display card (US-N8)
 - `frontend/utils/api/funds.ts` - API client functions (includes fetchCompareFunds for US-N6)
 - `frontend/utils/api/switch.ts` - Switch API client functions (includes fetchSwitchPreview for US-N8)
-- `frontend/types/fund.ts` - TypeScript type definitions (includes CompareFundsResponse, CompareFundData, FeeGroup, DealingConstraints, DistributionData for US-N6, AIMC classification fields and investment constraints for FundDetail and FundSummary, ShareClassInfo, ShareClassListResponse, FeeBreakdownItem, FeeBreakdownSection, FeeBreakdownResponse for fund detail enhancements, peer_focus field for US-N9/US-N13)
+- `frontend/types/fund.ts` - TypeScript type definitions (includes CompareFundsResponse, CompareFundData, FeeGroup, DealingConstraints, DistributionData for US-N6, AIMC classification fields and investment constraints for FundDetail and FundSummary, ShareClassInfo, ShareClassListResponse, FeeBreakdownItem, FeeBreakdownSection, FeeBreakdownResponse for fund detail enhancements, peer_focus field for US-N9/US-N13, peer_rank, trailing_1y_return, ytd_return for US-N12/US-N13)
+- `frontend/types/peer.ts` - TypeScript type definitions for peer ranking (PeerRank, PeerMetrics interfaces for US-N12, US-N13)
+- `frontend/utils/peerRankUtils.ts` - Frontend utility functions for formatting peer rank data (formatPeerRankForCard, isPeerRankAvailable, formatCategoryLabel, formatReturn, etc. for US-N13)
 - `frontend/types/switch.ts` - TypeScript type definitions for switch preview (SwitchPreviewRequest, SwitchPreviewResponse, ConstraintsDelta, SwitchPreviewMissingFlags, Deltas, Explainability, Coverage for US-N8)
 - `frontend/package.json` - Node.js dependencies and scripts
 
@@ -937,6 +1036,9 @@ Not applicable.
 - `docs/user_story/us-n6-manual-verification.md` - Manual verification steps for compare feature
 - `docs/user_story/us-n8.md` - User story N8: Switch Impact Preview v1 (Explainable, Constrained, Demo-Ready)
 - `docs/user_story/us-n9.md` - User story N9: Peer Group Classification & Data Model (Foundation for Peer Ranking)
+- `docs/user_story/us-n10.md` - User story N10: NAV/Performance Data Ingestion (Return Snapshots)
+- `docs/user_story/us-n11.md` - User story N11: Peer Group Computation Engine (Core Foundation)
+- `docs/user_story/us-n12.md` - User story N12: Peer Ranking Service (Core Ranking Logic)
 - `docs/user_story/us-n13.md` - User story N13: Browse Card Peer Rank Display (MVP UI)
 - `docs/frontend_validation_peer_classification.md` - Frontend validation guide for peer classification (US-N9)
 - `docs/share_class_implementation_plan.md` - Share class implementation plan and approach
