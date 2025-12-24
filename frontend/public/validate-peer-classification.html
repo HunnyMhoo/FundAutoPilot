@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Peer Classification Validation</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a2e;
+            color: #fff;
+        }
+        h1 {
+            color: #818cf8;
+        }
+        .test-section {
+            background: #16213e;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        button {
+            background: #6366f1;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            margin: 5px;
+        }
+        button:hover {
+            background: #818cf8;
+        }
+        button:disabled {
+            background: #4b5563;
+            cursor: not-allowed;
+        }
+        pre {
+            background: #0f172a;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-size: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .success {
+            color: #10b981;
+        }
+        .error {
+            color: #ef4444;
+        }
+        .warning {
+            color: #f59e0b;
+        }
+        .info {
+            color: #3b82f6;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        th, td {
+            padding: 8px;
+            text-align: left;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        th {
+            background: rgba(99, 102, 241, 0.2);
+            color: #818cf8;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .status-ok {
+            background: rgba(16, 185, 129, 0.2);
+            color: #10b981;
+        }
+        .status-fail {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔍 Peer Classification Validation Tool</h1>
+    <p>This tool validates peer classification data (US-N9) in the frontend.</p>
+
+    <div class="test-section">
+        <h2>Configuration</h2>
+        <label>
+            API URL: 
+            <input type="text" id="apiUrl" value="http://localhost:8000" style="width: 300px; padding: 5px; background: #0f172a; border: 1px solid rgba(255,255,255,0.1); color: #fff; border-radius: 4px;">
+        </label>
+        <button onclick="testAPI()">Test API Connection</button>
+    </div>
+
+    <div class="test-section">
+        <h2>Test 1: API Response Structure</h2>
+        <button onclick="testResponseStructure()">Check Response Structure</button>
+        <div id="test1-results"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>Test 2: Peer Focus Data</h2>
+        <button onclick="testPeerFocus()">Validate Peer Focus</button>
+        <div id="test2-results"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>Test 3: Sample Funds</h2>
+        <button onclick="showSampleFunds()">Show Sample Funds</button>
+        <div id="test3-results"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>Test 4: Coverage Statistics</h2>
+        <button onclick="showCoverage()">Show Coverage Stats</button>
+        <div id="test4-results"></div>
+    </div>
+
+    <script>
+        const API_URL = () => document.getElementById('apiUrl').value || 'http://localhost:8000';
+
+        async function testAPI() {
+            try {
+                const response = await fetch(`${API_URL()}/funds?limit=1`);
+                if (response.ok) {
+                    alert('✅ API connection successful!');
+                } else {
+                    alert(`❌ API error: ${response.status}`);
+                }
+            } catch (error) {
+                alert(`❌ Connection failed: ${error.message}`);
+            }
+        }
+
+        async function testResponseStructure() {
+            const results = document.getElementById('test1-results');
+            results.innerHTML = '<p class="info">Testing...</p>';
+
+            try {
+                const response = await fetch(`${API_URL()}/funds?limit=10`);
+                const data = await response.json();
+
+                const checks = {
+                    hasItems: Array.isArray(data.items),
+                    hasPeerFocus: data.items.some(f => 'peer_focus' in f),
+                    hasAimcCategory: data.items.some(f => 'aimc_category' in f),
+                    hasAimcSource: data.items.some(f => 'aimc_category_source' in f),
+                };
+
+                let html = '<h3>Response Structure Checks:</h3><ul>';
+                html += `<li class="${checks.hasItems ? 'success' : 'error'}">Has items array: ${checks.hasItems ? '✅' : '❌'}</li>`;
+                html += `<li class="${checks.hasPeerFocus ? 'success' : 'error'}">Has peer_focus field: ${checks.hasPeerFocus ? '✅' : '❌'}</li>`;
+                html += `<li class="${checks.hasAimcCategory ? 'success' : 'error'}">Has aimc_category field: ${checks.hasAimcCategory ? '✅' : '❌'}</li>`;
+                html += `<li class="${checks.hasAimcSource ? 'success' : 'error'}">Has aimc_category_source field: ${checks.hasAimcSource ? '✅' : '❌'}</li>`;
+                html += '</ul>';
+
+                results.innerHTML = html;
+            } catch (error) {
+                results.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+            }
+        }
+
+        async function testPeerFocus() {
+            const results = document.getElementById('test2-results');
+            results.innerHTML = '<p class="info">Testing...</p>';
+
+            try {
+                const response = await fetch(`${API_URL()}/funds?limit=50`);
+                const data = await response.json();
+
+                const stats = {
+                    total: data.items.length,
+                    withPeerFocus: data.items.filter(f => f.peer_focus).length,
+                    withAimcCategory: data.items.filter(f => f.aimc_category).length,
+                    matching: data.items.filter(f => 
+                        f.peer_focus && f.aimc_category && f.peer_focus === f.aimc_category
+                    ).length,
+                    mismatched: data.items.filter(f => 
+                        f.peer_focus && f.aimc_category && f.peer_focus !== f.aimc_category
+                    ).length,
+                };
+
+                let html = '<h3>Peer Focus Validation:</h3>';
+                html += `<p>Total funds: <strong>${stats.total}</strong></p>`;
+                html += `<p class="${stats.withPeerFocus > 0 ? 'success' : 'error'}">Funds with peer_focus: <strong>${stats.withPeerFocus}</strong> (${(stats.withPeerFocus/stats.total*100).toFixed(1)}%)</p>`;
+                html += `<p class="${stats.withAimcCategory > 0 ? 'success' : 'error'}">Funds with aimc_category: <strong>${stats.withAimcCategory}</strong></p>`;
+                html += `<p class="${stats.matching === stats.withPeerFocus ? 'success' : 'warning'}">Matching (peer_focus === aimc_category): <strong>${stats.matching}</strong></p>`;
+                
+                if (stats.mismatched > 0) {
+                    html += `<p class="error">⚠️ Mismatched: <strong>${stats.mismatched}</strong> funds</p>`;
+                }
+
+                results.innerHTML = html;
+            } catch (error) {
+                results.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+            }
+        }
+
+        async function showSampleFunds() {
+            const results = document.getElementById('test3-results');
+            results.innerHTML = '<p class="info">Loading...</p>';
+
+            try {
+                const response = await fetch(`${API_URL()}/funds?limit=10`);
+                const data = await response.json();
+
+                let html = '<h3>Sample Funds:</h3><table><thead><tr><th>Fund ID</th><th>Name</th><th>AIMC Category</th><th>Peer Focus</th><th>Match</th></tr></thead><tbody>';
+
+                data.items.forEach(fund => {
+                    const match = fund.peer_focus === fund.aimc_category;
+                    html += `<tr>
+                        <td>${fund.fund_id}</td>
+                        <td>${fund.fund_name.substring(0, 30)}...</td>
+                        <td>${fund.aimc_category || '—'}</td>
+                        <td>${fund.peer_focus || '—'}</td>
+                        <td><span class="status-badge ${match ? 'status-ok' : 'status-fail'}">${match ? '✓' : '✗'}</span></td>
+                    </tr>`;
+                });
+
+                html += '</tbody></table>';
+                results.innerHTML = html;
+            } catch (error) {
+                results.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+            }
+        }
+
+        async function showCoverage() {
+            const results = document.getElementById('test4-results');
+            results.innerHTML = '<p class="info">Loading...</p>';
+
+            try {
+                const response = await fetch(`${API_URL()}/funds?limit=100`);
+                const data = await response.json();
+
+                const categories = {};
+                data.items.forEach(fund => {
+                    const cat = fund.aimc_category || 'No Category';
+                    categories[cat] = (categories[cat] || 0) + 1;
+                });
+
+                const sorted = Object.entries(categories)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 10);
+
+                let html = '<h3>Top 10 AIMC Categories:</h3><table><thead><tr><th>Category</th><th>Count</th></tr></thead><tbody>';
+
+                sorted.forEach(([cat, count]) => {
+                    html += `<tr><td>${cat}</td><td>${count}</td></tr>`;
+                });
+
+                html += '</tbody></table>';
+                results.innerHTML = html;
+            } catch (error) {
+                results.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+            }
+        }
+    </script>
+</body>
+</html>
+

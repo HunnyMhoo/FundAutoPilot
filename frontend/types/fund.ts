@@ -8,6 +8,11 @@ export interface FundSummary {
     amc_name: string;
     category: string | null;
     risk_level: string | null;
+    aimc_category: string | null;  // US-N13: AIMC fund classification
+    aimc_category_source: string | null;  // US-N13: Source of AIMC category
+    peer_focus: string | null;  // US-N9, US-N13: Investment focus (for category display)
+    trailing_1y_return: number | null;  // US-N10, US-N13: 1Y trailing return percentage
+    ytd_return: number | null;  // US-N10, US-N13: YTD return percentage (fallback if 1Y unavailable)
     // expense_ratio removed - not displayed in UI, would require expensive calculations
     // For accurate expense ratio, see FundDetail or /funds/{fund_id}/fees endpoint
 }

@@ -29,6 +29,23 @@ The application consists of:
   - Database contains `aimc_category` field populated for 94% of funds (3,139 from AIMC CSV, 2,040 from SEC API fallback)
 - **Current limitations**: 6% of funds (330) have no AIMC classification available
 
+### Peer Group Classification (US-N9)
+- **What it does**: Computes and stores peer group classification for funds based on AIMC category, currency, FX hedge flag, and distribution policy. Enables peer group membership queries for future peer ranking features. Stores peer classification fields (`peer_focus`, `peer_currency`, `peer_fx_hedged_flag`, `peer_distribution_policy`, `peer_key`, `peer_key_fallback_level`) in Fund table.
+- **Where it lives**: 
+  - Backend: `backend/app/models/fund_orm.py` (6 new peer classification fields), `backend/app/services/peer_classification_service.py` (classification service), `backend/app/services/ingestion/migrate_peer_classification_columns.py` (migration script), `backend/scripts/reclassify_all_funds.py` (bulk classification script), `backend/scripts/fix_peer_currency_codes.py` (currency code fix script)
+  - Frontend: `frontend/types/fund.ts` (peer_focus field in FundSummary), `frontend/components/FundCatalog/FundCard.tsx` (category display with formatCategoryLabel)
+- **How to verify**: 
+  - Database contains peer classification fields populated for ~80% of funds (4,391/5,509)
+  - `peer_focus` matches `aimc_category` exactly (per US-N9 requirement)
+  - `peer_key` format: `AIMC_TYPE|FOCUS|CURRENCY|HEDGE|DIST` (e.g., "US Equity|US Equity|THB|Unknown|A")
+  - API response includes `peer_focus` field in FundSummary
+  - Fund cards display AIMC category correctly
+  - Run validation: `python -m scripts.reclassify_all_funds` or check database with validation queries
+- **Current limitations**: 
+  - ~20% of funds have no peer_key (missing AIMC category)
+  - Most funds show "Unknown" for hedge flag (hedge keywords not present in AIMC category names)
+  - Distribution policy missing for some funds (SEC API data unavailable)
+
 ### Fund Detail Page
 - **What it does**: Displays comprehensive fund information including fund classification (Risk Level, AIMC Type), investment requirements, share class navigation, fee breakdown, investment strategy, and distribution policy. Multi-card layout with data fetched from SEC API.
 - **Where it lives**: 
@@ -107,6 +124,7 @@ The application consists of:
 - Query parameters: `limit` (1-100, default 25), `cursor`, `sort`, `q` (search), `amc[]`, `category[]`, `risk[]`, `fee_band[]`
 - Returns: `FundListResponse` with items, next_cursor, as_of_date, data_snapshot_id
 - Share class support: Returns separate entries for each share class. `fund_id` in response uses `class_abbr_name` when available, otherwise `proj_id`.
+- Peer classification: Includes `peer_focus` field in FundSummary response (US-N9, US-N13)
 
 **GET /funds/count** (`backend/app/api/funds.py` lines 47-54)
 - Purpose: Get total count of active funds
@@ -197,9 +215,10 @@ The application consists of:
 `fund` (`backend/app/models/fund_orm.py` lines 33-90)
 - Primary key: Composite `(proj_id, class_abbr_name)` - Supports share classes as separate funds
 - Foreign key: `amc_id` → `amc.unique_id`
-- Fields: `proj_id` (String(50)), `class_abbr_name` (String(50), empty string for funds without classes), `fund_name_th`, `fund_name_en`, `fund_abbr`, `fund_status` (required), `regis_date`, `category`, `risk_level`, `risk_level_int`, `risk_level_desc`, `risk_last_upd_date`, `expense_ratio`, `expense_ratio_last_upd_date`, `fee_data_raw` (JSONB), `fee_data_last_upd_date`, `last_upd_date`, `data_snapshot_id`, `data_source`, `aimc_category` (String(100)), `aimc_code` (String(20)), `aimc_category_source` (String(20))
+- Fields: `proj_id` (String(50)), `class_abbr_name` (String(50), empty string for funds without classes), `fund_name_th`, `fund_name_en`, `fund_abbr`, `fund_status` (required), `regis_date`, `category`, `risk_level`, `risk_level_int`, `risk_level_desc`, `risk_last_upd_date`, `expense_ratio`, `expense_ratio_last_upd_date`, `fee_data_raw` (JSONB), `fee_data_last_upd_date`, `last_upd_date`, `data_snapshot_id`, `data_source`, `aimc_category` (String(100)), `aimc_code` (String(20)), `aimc_category_source` (String(20)), `peer_focus` (String(100)), `peer_currency` (String(10)), `peer_fx_hedged_flag` (String(20)), `peer_distribution_policy` (String(1)), `peer_key` (String(500)), `peer_key_fallback_level` (Integer, default 0)
 - Normalized search fields: `fund_name_norm`, `fund_abbr_norm` (populated during ingestion)
 - AIMC classification: `aimc_category` stores display category name, `aimc_code` stores raw SEC API code, `aimc_category_source` indicates source ('AIMC_CSV' or 'SEC_API')
+- Peer classification (US-N9): `peer_focus` is exact copy of `aimc_category`, `peer_currency` extracted from SEC API (defaults to "THB"), `peer_fx_hedged_flag` from AIMC category keywords ("Hedged", "Unhedged", "Mixed", "Unknown"), `peer_distribution_policy` from SEC API ("D" or "A"), `peer_key` composite key format: `AIMC_TYPE|FOCUS|CURRENCY|HEDGE|DIST`, `peer_key_fallback_level` tracks missing dimensions (0=full, 1=missing dist, 2=missing hedge, 3=AIMC-only)
 - Share class support: Funds with multiple share classes (e.g., K-INDIA-A(A), K-INDIA-A(D)) are stored as separate records with same `proj_id` but different `class_abbr_name`. Class name used as `fund_abbr` and `fund_id` in API responses.
 - Indexes:
   - `idx_fund_name_asc` on (`fund_name_en`, `proj_id`)
@@ -211,6 +230,7 @@ The application consists of:
   - `idx_fund_risk_int` on (`fund_status`, `risk_level_int`) - Composite for filtering + aggregation (US-N4)
   - `idx_fund_amc` on (`fund_status`, `amc_id`) - For AMC filtering and aggregation (US-N3)
   - `idx_fund_aimc_category` on (`fund_status`, `aimc_category`) - For AIMC category filtering
+  - `idx_fund_peer_key` on (`peer_key`) - Partial index for peer group membership queries (US-N9)
 
 `amc` (`backend/app/models/fund_orm.py` lines 11-30)
 - Primary key: `unique_id` (String(20))
@@ -226,12 +246,12 @@ The application consists of:
 - Indexes:
   - `idx_switch_preview_log_created_at` on (`created_at`) - For querying recent previews
 
-**Migration/Seeding**: Tables created via `Base.metadata.create_all()` in ingestion script (`backend/app/services/ingestion/ingest_funds.py` line 194). Schema migrations handled via `backend/app/services/ingestion/migrate_schema.py` script (adds columns, updates primary keys, creates indexes). AIMC classification columns added via `backend/app/services/ingestion/migrate_aimc_columns.py` script. Switch preview log table created via `backend/app/services/ingestion/migrate_switch_preview_log.py` script. No Alembic migrations present.
+**Migration/Seeding**: Tables created via `Base.metadata.create_all()` in ingestion script (`backend/app/services/ingestion/ingest_funds.py` line 194). Schema migrations handled via `backend/app/services/ingestion/migrate_schema.py` script (adds columns, updates primary keys, creates indexes). AIMC classification columns added via `backend/app/services/ingestion/migrate_aimc_columns.py` script. Peer classification columns added via `backend/app/services/ingestion/migrate_peer_classification_columns.py` script (US-N9). Switch preview log table created via `backend/app/services/ingestion/migrate_switch_preview_log.py` script. No Alembic migrations present.
 
 ### Business Logic / Domain Services
 
 **FundService** (`backend/app/services/fund_service.py`)
-- `list_funds()`: Cursor-based pagination with keyset method, supports nullable sort columns, handles search via Elasticsearch (with SQL fallback), applies filters (AMC, category, risk, fee_band), supports 6 sort options. Returns separate entries for each share class with class name as `fund_id`. Includes AIMC classification fields in response.
+- `list_funds()`: Cursor-based pagination with keyset method, supports nullable sort columns, handles search via Elasticsearch (with SQL fallback), applies filters (AMC, category, risk, fee_band), supports 6 sort options. Returns separate entries for each share class with class name as `fund_id`. Includes AIMC classification fields and `peer_focus` in response (US-N9, US-N13).
 - `_list_funds_elasticsearch()`: Uses Elasticsearch search backend with automatic fallback to SQL when ES index is empty
 - `_list_funds_sql()`: SQL-based search using normalized fields with fallback to raw fields when normalized is NULL
 - `get_fund_by_id()`: Supports lookup by class_abbr_name (e.g., "K-INDIA-A(A)") or proj_id. Returns class name as `fund_id` when class exists. Fetches investment constraints, redemption period, dividend policy, and fund policy from SEC API on-demand. Returns AIMC classification with source indicator, management style with description, dividend policy, and share class info (proj_id, class_abbr_name). Expense ratio now uses actual value from fee breakdown (matches fund detail page display), falling back to stored `expense_ratio` if fee breakdown unavailable.
@@ -284,6 +304,18 @@ The application consists of:
 - Stores both AIMC CSV category (primary) and SEC API code (for reference) with source tracking
 - Coverage: 57% from AIMC CSV (3,139 funds), 37% from SEC API fallback (2,040 funds), 6% unmatched (330 funds)
 - SEC code mapping: Maps 44 unique SEC API codes to AIMC category names (e.g., "JPEQ" → "Japan Equity", "EG" → "Equity General")
+
+**PeerClassificationService** (`backend/app/services/peer_classification_service.py`)
+- `compute_peer_focus()`: Returns exact copy of `aimc_category` (per US-N9 requirement)
+- `compute_peer_currency()`: Extracts currency from SEC API investment constraints, defaults to "THB" if missing or numeric code detected
+- `compute_peer_fx_hedged_flag()`: Extracts hedge flag from AIMC category name using exact keyword matching ("Fully FX Risk Hedge" → "Hedged", "Discretionary F/X Hedge" → "Mixed", etc.)
+- `compute_peer_distribution_policy()`: Extracts distribution policy from SEC API dividend endpoint, maps "Y" → "D" (Dividend), "N" → "A" (Accumulation)
+- `compute_peer_key()`: Builds composite peer key: `AIMC_TYPE|FOCUS|CURRENCY|HEDGE|DIST`
+- `determine_fallback_level()`: Calculates fallback level (0=full, 1=missing dist, 2=missing hedge, 3=AIMC-only)
+- `classify_fund()`: Classifies single fund and updates database
+- `classify_all_funds()`: Bulk classification with batch processing and statistics collection
+- Coverage: ~80% of funds (4,391/5,509) have peer_key populated
+- Currency handling: Detects and converts numeric currency codes (e.g., "0102500166") to "THB"
 
 **CompareService** (`backend/app/services/compare_service.py`)
 - `compare_funds()`: Aggregates comparison data for 2-3 funds, fetches data from database and SEC API, applies class selection logic, groups fees into categories, structures response with missing flags and data freshness
@@ -411,6 +443,7 @@ The application consists of:
 - Displays individual fund summary (name, AMC, category, risk, AIMC type)
 - Two-column grid: Risk and AIMC Type (Fee column removed)
 - AIMC Type displayed in green color with asterisk (*) indicator for SEC_API fallback
+- Category display: Uses `formatCategoryLabel()` to display AIMC category with focus (US-N13 partial, peer_focus is same as aimc_category per US-N9)
 - Compare button: Inline icon button (+ / ✓) in header row next to fund name
 - Links to fund detail page with state preservation
 - Note: Dividend policy and management style badges removed from catalog (require per-fund SEC API calls, impacting list performance). These are displayed on fund detail page only.
@@ -531,7 +564,7 @@ The application consists of:
 ### API Wiring
 
 **API Client** (`frontend/utils/api/funds.ts`)
-- `fetchFunds()`: Calls `/funds` endpoint with query params
+- `fetchFunds()`: Calls `/funds` endpoint with query params, returns `FundListResponse` with `peer_focus` field (US-N9, US-N13)
 - `fetchFundCount()`: Calls `/funds/count` endpoint
 - `fetchFundDetail()`: Calls `/funds/{fund_id}` endpoint, returns `FundDetail`
 - `fetchCategories()`: Calls `/funds/categories` endpoint, returns `CategoryListResponse` (US-N3)
@@ -791,6 +824,8 @@ Not applicable.
 
 20. **[DONE] Implement Switch Impact Preview (US-N8)**: Created SwitchService with expense ratio calculation from SEC API fee breakdown (matches fund detail page), constraints delta calculation, coverage classification, and per-section missing flags. Backend endpoint `POST /switch/preview` returns calculated deltas, explainability, and coverage status. Frontend components: SwitchPreviewPage (standalone route), SwitchPreviewPanel (inline on Compare page), FeeImpactCard, RiskChangeCard, CategoryChangeCard, ConstraintsDeltaCard, ExplanationCard. Database table `switch_preview_log` for request traceability. Migration script `migrate_switch_preview_log.py` creates log table. Verified by navigating to compare page, clicking "Switch Preview", selecting funds and amount, viewing preview with fee impact, risk change, category change, and constraints differences. Expense ratio fix: Uses actual expense ratio from SEC API fee breakdown (actual_value from "Total Fees & Expenses" row), ensuring consistency with fund detail page display.
 
+21. **[DONE] Implement Peer Group Classification (US-N9)**: Created database migration script adding 6 peer classification fields to Fund table (`peer_focus`, `peer_currency`, `peer_fx_hedged_flag`, `peer_distribution_policy`, `peer_key`, `peer_key_fallback_level`). Created PeerClassificationService with methods to compute peer focus (exact copy of aimc_category), currency (from SEC API, defaults to THB), hedge flag (from AIMC category keywords), distribution policy (from SEC API dividend endpoint), and peer key (composite format: `AIMC_TYPE|FOCUS|CURRENCY|HEDGE|DIST`). Created bulk re-classification script `reclassify_all_funds.py` with batch processing and statistics. Created currency code fix script to handle numeric codes from SEC API. Updated FundService to include `peer_focus` in API response. Updated frontend types and FundCard component to display category (US-N13 partial). Created unit tests for PeerClassificationService. Coverage: ~80% of funds (4,391/5,509) have peer_key populated. Verified by running bulk classification script and checking database with validation queries. Currency fix: Detects and converts numeric currency codes (e.g., "0102500166") to "THB".
+
 17. **Full re-ingestion for share classes**: Run ingestion script to populate class data for all funds with share classes. Verify by checking database has separate records for funds with multiple classes.
 
 18. **Cleanup base fund records**: Remove base fund records (with empty `class_abbr_name`) for funds that have share classes. Verify by checking no duplicate entries in fund list.
@@ -819,6 +854,12 @@ Not applicable.
 - `backend/app/services/ingestion/migrate_schema.py` - Database schema migration script (adds columns, updates primary keys)
 - `backend/app/services/ingestion/migrate_aimc_columns.py` - Migration script for AIMC classification columns
 - `backend/app/services/ingestion/ingest_aimc_categories.py` - AIMC classification ingestion script (matches AIMC CSV and SEC API codes)
+- `backend/app/services/ingestion/migrate_peer_classification_columns.py` - Migration script for peer classification columns (US-N9)
+- `backend/app/services/peer_classification_service.py` - Peer classification service with computation methods (US-N9)
+- `backend/scripts/reclassify_all_funds.py` - Bulk re-classification script for peer groups (US-N9)
+- `backend/scripts/fix_peer_currency_codes.py` - Script to fix numeric currency codes (US-N9)
+- `backend/scripts/validate_peer_classification.sql` - SQL validation queries for peer classification data (US-N9)
+- `backend/tests/test_peer_classification_service.py` - Unit tests for peer classification service (US-N9)
 - `backend/app/utils/sec_api_client.py` - SEC API client with `fetch_class_fund()` method for share class data and `fetch_fund_compare()` for AIMC codes
 - `backend/app/services/ingestion/enrich_funds.py` - Fund enrichment service (risk level and expense ratio with class-specific support)
 - `backend/app/services/compare_service.py` - Compare service aggregating fund comparison data (US-N6)
@@ -836,6 +877,7 @@ Not applicable.
 - `backend/tests/test_fee_grouping.py` - Fee grouping utility tests (US-N6)
 - `backend/tests/test_switch_api.py` - Switch preview API endpoint tests (US-N8)
 - `backend/tests/test_switch_service.py` - Switch service business logic tests (US-N8)
+- `backend/tests/test_peer_classification_service.py` - Peer classification service tests (US-N9)
 - `backend/tests/conftest.py` - Pytest configuration
 - `backend/requirements.txt` - Python dependencies (includes elasticsearch, aiohttp)
 - `backend/Dockerfile` - Backend container definition
@@ -876,7 +918,7 @@ Not applicable.
 - `frontend/components/Switch/ExplanationCard.tsx` - Explainability information display card (US-N8)
 - `frontend/utils/api/funds.ts` - API client functions (includes fetchCompareFunds for US-N6)
 - `frontend/utils/api/switch.ts` - Switch API client functions (includes fetchSwitchPreview for US-N8)
-- `frontend/types/fund.ts` - TypeScript type definitions (includes CompareFundsResponse, CompareFundData, FeeGroup, DealingConstraints, DistributionData for US-N6, AIMC classification fields and investment constraints for FundDetail and FundSummary, ShareClassInfo, ShareClassListResponse, FeeBreakdownItem, FeeBreakdownSection, FeeBreakdownResponse for fund detail enhancements)
+- `frontend/types/fund.ts` - TypeScript type definitions (includes CompareFundsResponse, CompareFundData, FeeGroup, DealingConstraints, DistributionData for US-N6, AIMC classification fields and investment constraints for FundDetail and FundSummary, ShareClassInfo, ShareClassListResponse, FeeBreakdownItem, FeeBreakdownSection, FeeBreakdownResponse for fund detail enhancements, peer_focus field for US-N9/US-N13)
 - `frontend/types/switch.ts` - TypeScript type definitions for switch preview (SwitchPreviewRequest, SwitchPreviewResponse, ConstraintsDelta, SwitchPreviewMissingFlags, Deltas, Explainability, Coverage for US-N8)
 - `frontend/package.json` - Node.js dependencies and scripts
 
@@ -894,6 +936,9 @@ Not applicable.
 - `docs/user_story/us-n6.md` - User story N6: Compare tray and side-by-side comparison
 - `docs/user_story/us-n6-manual-verification.md` - Manual verification steps for compare feature
 - `docs/user_story/us-n8.md` - User story N8: Switch Impact Preview v1 (Explainable, Constrained, Demo-Ready)
+- `docs/user_story/us-n9.md` - User story N9: Peer Group Classification & Data Model (Foundation for Peer Ranking)
+- `docs/user_story/us-n13.md` - User story N13: Browse Card Peer Rank Display (MVP UI)
+- `docs/frontend_validation_peer_classification.md` - Frontend validation guide for peer classification (US-N9)
 - `docs/share_class_implementation_plan.md` - Share class implementation plan and approach
 - `docs/architecture_recommendations.md` - Architecture guidance
 

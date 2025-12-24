@@ -69,6 +69,14 @@ class Fund(Base):
     data_snapshot_id: Mapped[str | None] = mapped_column(String(50))
     data_source: Mapped[str | None] = mapped_column(String(20))  # Data source identifier (e.g., "SEC")
     
+    # Peer Classification fields (US-N9)
+    peer_focus: Mapped[str | None] = mapped_column(String(100))  # Investment focus (exact copy of aimc_category)
+    peer_currency: Mapped[str | None] = mapped_column(String(10))  # Base currency (THB, USD, etc.)
+    peer_fx_hedged_flag: Mapped[str | None] = mapped_column(String(20))  # FX hedge status (Hedged, Unhedged, Mixed, Unknown)
+    peer_distribution_policy: Mapped[str | None] = mapped_column(String(1))  # Distribution policy (D=Dividend, A=Accumulation)
+    peer_key: Mapped[str | None] = mapped_column(String(500))  # Computed peer group key
+    peer_key_fallback_level: Mapped[int] = mapped_column(Integer, default=0)  # Fallback level (0=full, 1=dropped dist, 2=dropped hedge, 3=AIMC-only)
+    
     # Normalized fields for search
     fund_name_norm: Mapped[str | None] = mapped_column(String(500))
     fund_abbr_norm: Mapped[str | None] = mapped_column(String(50))
@@ -88,6 +96,7 @@ class Fund(Base):
         Index("idx_fund_risk_int", "fund_status", "risk_level_int"),  # Composite for filtering + aggregation (US-N4)
         Index("idx_fund_amc", "fund_status", "amc_id"),       # For AMC filtering and aggregation
         Index("idx_fund_aimc_category", "fund_status", "aimc_category"),  # For AIMC category filtering
+        Index("idx_fund_peer_key", "peer_key"),  # For peer group membership queries (partial index on non-NULL)
     )
     
     def __repr__(self) -> str:
@@ -100,3 +109,57 @@ class Fund(Base):
         if self.class_abbr_name and self.class_abbr_name != '':
             return self.class_abbr_name
         return self.fund_abbr or self.proj_id
+
+
+class SwitchPreviewLog(Base):
+    """Switch preview log for tracking preview requests."""
+    
+    __tablename__ = "switch_preview_log"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    current_fund_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    target_fund_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    amount_thb: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    deltas_json: Mapped[dict] = mapped_column(JSON, nullable=False)  # Stored Deltas as JSON
+    missing_flags_json: Mapped[dict] = mapped_column(JSON, nullable=False)  # Stored missing flags as JSON
+    data_snapshot_id: Mapped[str | None] = mapped_column(String(50))  # Data snapshot ID for freshness tracking
+    
+    __table_args__ = (
+        Index("idx_switch_preview_log_created_at", "created_at"),
+    )
+    
+    def __repr__(self) -> str:
+        return f"<SwitchPreviewLog {self.id}: {self.current_fund_id} -> {self.target_fund_id} ({self.amount_thb} THB)>"
+
+
+class FundReturnSnapshot(Base):
+    """Fund return snapshot for performance tracking and peer comparisons."""
+    
+    __tablename__ = "fund_return_snapshot"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Note: No foreign key constraint because fund table has composite primary key
+    # (proj_id, class_abbr_name), so proj_id alone is not unique
+    proj_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    class_abbr_name: Mapped[str] = mapped_column(String(50), nullable=False)
+    as_of_date: Mapped[date] = mapped_column(Date, nullable=False)
+    ytd_return: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    trailing_1y_return: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    trailing_3y_return: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    trailing_5y_return: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    eligible_1y: Mapped[bool] = mapped_column(default=False)
+    eligible_3y: Mapped[bool] = mapped_column(default=False)
+    eligible_5y: Mapped[bool] = mapped_column(default=False)
+    data_source: Mapped[str | None] = mapped_column(String(20))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    
+    __table_args__ = (
+        UniqueConstraint("proj_id", "class_abbr_name", "as_of_date", name="uq_fund_return_snapshot"),
+        Index("idx_fund_return_snapshot_lookup", "proj_id", "class_abbr_name", "as_of_date"),
+        Index("idx_fund_return_snapshot_date", "as_of_date"),
+    )
+    
+    def __repr__(self) -> str:
+        class_info = f" ({self.class_abbr_name})" if self.class_abbr_name else ""
+        return f"<FundReturnSnapshot {self.proj_id}{class_info}: {self.as_of_date}>"

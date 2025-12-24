@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
-from app.models.fund_orm import Fund, AMC
+from app.models.fund_orm import Fund, AMC, FundReturnSnapshot
 
 logger = logging.getLogger(__name__)
 from app.models.fund import FundSummary, FundListResponse, CursorData
@@ -117,8 +117,41 @@ class FundService:
             return await self._list_funds_sql(limit, cursor, sort, q, filters)
         
         # Convert Elasticsearch results to FundSummary
+        # First, collect fund_ids to look up Fund records for return data
+        fund_ids = [doc["fund_id"] for doc in search_result["items"]]
+        
+        # Look up Fund records to get proj_id and class_abbr_name for return data fetching
+        fund_records = []
+        for fund_id in fund_ids:
+            # Try lookup by class_abbr_name first
+            query = select(Fund).where(Fund.class_abbr_name == fund_id)
+            result = await self.db.execute(query)
+            fund = result.scalar_one_or_none()
+            
+            if not fund:
+                # Fallback to proj_id
+                query = select(Fund).where(Fund.proj_id == fund_id).where(Fund.class_abbr_name == "")
+                result = await self.db.execute(query)
+                fund = result.scalar_one_or_none()
+            
+            if fund:
+                fund_records.append(fund)
+        
+        # Fetch return snapshots for all funds (US-N10, US-N13)
+        return_data = await self._fetch_return_snapshots(fund_records)
+        
         items = []
         for doc in search_result["items"]:
+            # Find corresponding fund record for return data
+            fund_id = doc["fund_id"]
+            fund_record = next((f for f in fund_records if (f.class_abbr_name == fund_id) or (f.proj_id == fund_id and not f.class_abbr_name)), None)
+            
+            # Get return data if fund record found
+            returns = {"trailing_1y_return": None, "ytd_return": None}
+            if fund_record:
+                fund_key = (fund_record.proj_id, fund_record.class_abbr_name if fund_record.class_abbr_name else "")
+                returns = return_data.get(fund_key, returns)
+            
             items.append(FundSummary(
                 fund_id=doc["fund_id"],
                 fund_name=doc["fund_name"],
@@ -128,6 +161,8 @@ class FundService:
                 expense_ratio=float(doc["expense_ratio"]) if doc.get("expense_ratio") is not None else None,
                 aimc_category=doc.get("aimc_category"),
                 aimc_category_source=doc.get("aimc_category_source"),
+                trailing_1y_return=returns["trailing_1y_return"],  # US-N10, US-N13
+                ytd_return=returns["ytd_return"],  # US-N10, US-N13
             ))
         
         # Get snapshot info from database
@@ -295,6 +330,9 @@ class FundService:
         if has_more:
             funds = funds[:limit]
 
+        # Fetch return snapshots for all funds (US-N10, US-N13)
+        return_data = await self._fetch_return_snapshots(funds)
+        
         # Build Response
         items = []
         for fund in funds:
@@ -313,6 +351,10 @@ class FundService:
             # Use class_abbr_name as fund_id if it exists, otherwise use proj_id
             display_fund_id = fund.class_abbr_name if fund.class_abbr_name and fund.class_abbr_name != "" else fund.proj_id
             
+            # Get return data for this fund (US-N10, US-N13)
+            fund_key = (fund.proj_id, fund.class_abbr_name if fund.class_abbr_name else "")
+            returns = return_data.get(fund_key, {"trailing_1y_return": None, "ytd_return": None})
+            
             items.append(FundSummary(
                 fund_id=display_fund_id,
                 fund_name=fund.fund_name_en,
@@ -321,6 +363,9 @@ class FundService:
                 risk_level=risk_level_display,
                 aimc_category=fund.aimc_category,
                 aimc_category_source=fund.aimc_category_source,
+                peer_focus=fund.peer_focus,  # US-N9, US-N13: For category display
+                trailing_1y_return=returns["trailing_1y_return"],  # US-N10, US-N13
+                ytd_return=returns["ytd_return"],  # US-N10, US-N13
             ))
 
         # Build next cursor
@@ -1341,6 +1386,92 @@ class FundService:
             "total_expense_ratio_actual": total_expense_actual,
             "last_upd_date": last_upd_date,
         }
+    
+    async def _fetch_return_snapshots(
+        self, 
+        funds: list[Fund]
+    ) -> dict[tuple[str, str], dict[str, float | None]]:
+        """
+        Fetch latest return snapshots for a list of funds.
+        
+        Uses a single batch query with window function to get latest snapshot per fund/class.
+        
+        Args:
+            funds: List of Fund ORM objects
+            
+        Returns:
+            Dict mapping (proj_id, class_abbr_name) to dict with trailing_1y_return and ytd_return
+        """
+        if not funds:
+            return {}
+        
+        # Build list of (proj_id, class_abbr_name) tuples
+        fund_keys = [
+            (fund.proj_id, fund.class_abbr_name if fund.class_abbr_name else "")
+            for fund in funds
+        ]
+        
+        # Initialize return data with None values
+        return_data = {key: {"trailing_1y_return": None, "ytd_return": None} for key in fund_keys}
+        
+        # Build conditions for all fund/class combinations
+        conditions = []
+        for proj_id, class_abbr_name in fund_keys:
+            conditions.append(
+                and_(
+                    FundReturnSnapshot.proj_id == proj_id,
+                    FundReturnSnapshot.class_abbr_name == class_abbr_name
+                )
+            )
+        
+        if not conditions:
+            return return_data
+        
+        # Use window function to get latest snapshot per fund/class in a single query
+        from sqlalchemy import distinct, case
+        
+        # Subquery to rank snapshots by date per fund/class
+        ranked_snapshots = (
+            select(
+                FundReturnSnapshot.proj_id,
+                FundReturnSnapshot.class_abbr_name,
+                FundReturnSnapshot.trailing_1y_return,
+                FundReturnSnapshot.ytd_return,
+                func.row_number()
+                .over(
+                    partition_by=[FundReturnSnapshot.proj_id, FundReturnSnapshot.class_abbr_name],
+                    order_by=FundReturnSnapshot.as_of_date.desc()
+                )
+                .label("rn")
+            )
+            .where(or_(*conditions))
+            .subquery()
+        )
+        
+        # Get only the latest snapshot (rn=1) for each fund/class
+        latest_snapshots_query = (
+            select(
+                ranked_snapshots.c.proj_id,
+                ranked_snapshots.c.class_abbr_name,
+                ranked_snapshots.c.trailing_1y_return,
+                ranked_snapshots.c.ytd_return,
+            )
+            .where(ranked_snapshots.c.rn == 1)
+        )
+        
+        result = await self.db.execute(latest_snapshots_query)
+        rows = result.all()
+        
+        # Map results to return_data
+        for row in rows:
+            key = (row.proj_id, row.class_abbr_name)
+            if key in return_data:
+                return_data[key] = {
+                    "trailing_1y_return": float(row.trailing_1y_return) if row.trailing_1y_return is not None else None,
+                    "ytd_return": float(row.ytd_return) if row.ytd_return is not None else None,
+                }
+        
+        return return_data
     
     async def _get_fund_record(self, fund_id: str):
         """

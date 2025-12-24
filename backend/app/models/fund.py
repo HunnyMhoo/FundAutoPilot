@@ -15,9 +15,16 @@ class FundSummary(BaseModel):
     aimc_category: str | None = Field(None, description="AIMC fund classification")
     aimc_category_source: str | None = Field(None, description="Source: 'AIMC_CSV' or 'SEC_API'")
     
+    # Peer classification fields (US-N9, US-N13)
+    peer_focus: str | None = Field(None, description="Investment focus (exact copy of aimc_category, for category display)")
+    
     # New fields for Fund Card badges (1.2, 1.3)
     dividend_policy: str | None = Field(None, description="Dividend policy: 'Y' (pays dividends) or 'N' (accumulating)")
     management_style: str | None = Field(None, description="Management style display: 'Passive' or 'Active'")
+    
+    # Return data fields (US-N10, US-N13)
+    trailing_1y_return: float | None = Field(None, description="1Y trailing return percentage")
+    ytd_return: float | None = Field(None, description="YTD return percentage (fallback if 1Y unavailable)")
     
     # Note: expense_ratio removed from FundSummary (not displayed in UI, would require expensive per-fund calculations)
     # For accurate expense ratio, see FundDetail response or /funds/{fund_id}/fees endpoint
