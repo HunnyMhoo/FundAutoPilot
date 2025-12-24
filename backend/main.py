@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.funds import router as funds_router
+from app.api.switch import router as switch_router
 from app.core.database import get_db
 from app.services.fund_service import FundService
 from app.models.fund import MetaResponse
@@ -30,6 +31,7 @@ app.add_middleware(
 
 # Register routers
 app.include_router(funds_router)
+app.include_router(switch_router)
 
 
 @app.get("/")
