@@ -12,18 +12,22 @@ interface FundDetailPageProps {
 
 export async function generateMetadata({ params }: FundDetailPageProps): Promise<Metadata> {
     const { fundId } = await params;
+    // Decode URL-encoded characters (e.g., %26 -> &)
+    const decodedFundId = decodeURIComponent(fundId);
     return {
-        title: `Fund ${fundId} | Switch Impact Simulator`,
-        description: `View details for fund ${fundId}`,
+        title: `Fund ${decodedFundId} | Switch Impact Simulator`,
+        description: `View details for fund ${decodedFundId}`,
     };
 }
 
 export default async function FundDetailPage({ params }: FundDetailPageProps) {
     const { fundId } = await params;
+    // Decode URL-encoded characters (e.g., %26 -> &)
+    const decodedFundId = decodeURIComponent(fundId);
 
     return (
         <main>
-            <FundDetailView fundId={fundId} />
+            <FundDetailView fundId={decodedFundId} />
         </main>
     );
 }

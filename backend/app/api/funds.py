@@ -10,9 +10,11 @@ from app.models.fund import (
     CategoryListResponse,
     RiskListResponse,
     AMCListResponse,
-    MetaResponse
+    MetaResponse,
+    CompareFundsResponse,
 )
 from app.services.fund_service import FundService
+from app.services.compare_service import CompareService
 
 router = APIRouter(prefix="/funds", tags=["funds"])
 
@@ -140,6 +142,86 @@ async def get_amcs(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch AMCs: {str(e)}")
+
+
+@router.get("/compare", response_model=CompareFundsResponse)
+async def compare_funds(
+    ids: str = Query(..., description="Comma-separated fund IDs (2-3 funds)"),
+    db: AsyncSession = Depends(get_db),
+) -> CompareFundsResponse:
+    """
+    Compare 2-3 funds side-by-side.
+    
+    Returns comparison data including identity, risk, fees, dealing constraints,
+    and distribution information for each fund.
+    
+    Args:
+        ids: Comma-separated list of fund IDs (proj_id), must be 2-3 funds
+        
+    Returns:
+        CompareFundsResponse with comparison data for each fund
+        
+    Raises:
+        400: Invalid number of funds (< 2 or > 3), or invalid ID format
+        404: One or more fund IDs not found
+        500: Server error
+    """
+    service = CompareService(db)
+    
+    try:
+        # Parse and validate IDs
+        fund_ids = [id.strip() for id in ids.split(",") if id.strip()]
+        
+        if len(fund_ids) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail="At least 2 funds required for comparison"
+            )
+        
+        if len(fund_ids) > 3:
+            raise HTTPException(
+                status_code=400,
+                detail="Maximum 3 funds allowed for comparison"
+            )
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_ids = []
+        for fund_id in fund_ids:
+            if fund_id not in seen:
+                seen.add(fund_id)
+                unique_ids.append(fund_id)
+        
+        if len(unique_ids) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail="At least 2 distinct funds required for comparison"
+            )
+        
+        return await service.compare_funds(unique_ids)
+        
+    except HTTPException:
+        raise
+    except ValueError as e:
+        error_msg = str(e)
+        if "not found" in error_msg.lower():
+            raise HTTPException(
+                status_code=404,
+                detail=error_msg
+            )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=error_msg
+            )
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Unexpected error comparing funds: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred while comparing funds"
+        )
 
 
 @router.get("/{fund_id}", response_model=FundDetail)

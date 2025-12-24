@@ -123,6 +123,8 @@ class FundService:
                 category=doc.get("category"),
                 risk_level=doc.get("risk_level"),
                 expense_ratio=float(doc["expense_ratio"]) if doc.get("expense_ratio") is not None else None,
+                aimc_category=doc.get("aimc_category"),
+                aimc_category_source=doc.get("aimc_category_source"),
             ))
         
         # Get snapshot info from database
@@ -299,13 +301,18 @@ class FundService:
             # Use risk_level_int if available, fallback to risk_level string
             risk_level_display = str(fund.risk_level_int) if fund.risk_level_int is not None else fund.risk_level
             
+            # Use class_abbr_name as fund_id if it exists, otherwise use proj_id
+            display_fund_id = fund.class_abbr_name if fund.class_abbr_name and fund.class_abbr_name != "" else fund.proj_id
+            
             items.append(FundSummary(
-                fund_id=fund.proj_id,
+                fund_id=display_fund_id,
                 fund_name=fund.fund_name_en,
                 amc_name=amc_name,
                 category=fund.category,
                 risk_level=risk_level_display,
                 expense_ratio=float(fund.expense_ratio) if fund.expense_ratio is not None else None,
+                aimc_category=fund.aimc_category,
+                aimc_category_source=fund.aimc_category_source,
             ))
 
         # Build next cursor
@@ -713,7 +720,9 @@ class FundService:
         Get detailed fund information by fund_id.
         
         Args:
-            fund_id: Unique fund identifier (proj_id)
+            fund_id: Unique fund identifier (proj_id or class_abbr_name)
+                    - If class_abbr_name (e.g., "K-INDIA-A(A)"), looks up by class
+                    - Otherwise, looks up by proj_id
             
         Returns:
             FundDetail object with fund information
@@ -727,16 +736,30 @@ class FundService:
         if not fund_id or not fund_id.strip():
             raise ValueError("fund_id cannot be empty")
         
-        # Query fund with AMC relationship
+        fund_id = fund_id.strip()
+        
+        # Try lookup by class_abbr_name first (for share classes)
         query = (
             select(Fund)
             .join(AMC, Fund.amc_id == AMC.unique_id)
             .options(selectinload(Fund.amc))
-            .where(Fund.proj_id == fund_id.strip())
+            .where(Fund.class_abbr_name == fund_id)
         )
         
         result = await self.db.execute(query)
         fund = result.scalar_one_or_none()
+        
+        # If not found by class name, try proj_id (backward compatibility)
+        if fund is None:
+            query = (
+                select(Fund)
+                .join(AMC, Fund.amc_id == AMC.unique_id)
+                .options(selectinload(Fund.amc))
+                .where(Fund.proj_id == fund_id)
+                .where(Fund.class_abbr_name == "")  # Only fund-level records (no classes)
+            )
+            result = await self.db.execute(query)
+            fund = result.scalar_one_or_none()
         
         if fund is None:
             raise ValueError(f"Fund not found: {fund_id}")
@@ -775,8 +798,51 @@ class FundService:
         # Use risk_level_int if available, fallback to risk_level string
         risk_level_display = str(fund.risk_level_int) if fund.risk_level_int is not None else fund.risk_level
         
+        # Use class_abbr_name as fund_id if it exists, otherwise use proj_id
+        display_fund_id = fund.class_abbr_name if fund.class_abbr_name and fund.class_abbr_name != "" else fund.proj_id
+        
+        # AIMC Classification (with remark if from SEC_API)
+        aimc_category = fund.aimc_category
+        aimc_category_source = fund.aimc_category_source
+        
+        # Investment constraints - fetch from SEC API if available
+        min_investment = None
+        min_redemption = None
+        min_balance = None
+        redemption_period = None
+        
+        # Try to get investment data from SEC API
+        try:
+            investment_data = await self._get_investment_constraints(fund.proj_id)
+            if investment_data:
+                # Format minimum investment (SEC API returns code for currency, default to THB)
+                if investment_data.get('minimum_sub'):
+                    amount = investment_data['minimum_sub']
+                    min_investment = f"{self._format_currency_amount(amount)} THB"
+                # Format minimum redemption
+                if investment_data.get('minimum_redempt'):
+                    amount = investment_data['minimum_redempt']
+                    min_redemption = f"{self._format_currency_amount(amount)} THB"
+                # Format minimum balance (value or units)
+                if investment_data.get('lowbal_val') is not None and investment_data.get('lowbal_val') > 0:
+                    amount = investment_data['lowbal_val']
+                    min_balance = f"{self._format_currency_amount(amount)} THB"
+                elif investment_data.get('lowbal_unit') is not None and investment_data.get('lowbal_unit') > 0:
+                    units = investment_data['lowbal_unit']
+                    min_balance = f"{self._format_currency_amount(units)} units"
+        except Exception:
+            pass
+        
+        # Try to get redemption period data
+        try:
+            redemption_data = await self._get_redemption_data(fund.proj_id)
+            if redemption_data:
+                redemption_period = self._format_redemption_period(redemption_data)
+        except Exception:
+            pass
+        
         return FundDetail(
-            fund_id=fund.proj_id,
+            fund_id=display_fund_id,
             fund_name=fund.fund_name_en,
             fund_abbr=fund.fund_abbr,
             category=fund.category,
@@ -784,11 +850,126 @@ class FundService:
             amc_name=amc_name,
             risk_level=risk_level_display,
             expense_ratio=expense_ratio,
+            aimc_category=aimc_category,
+            aimc_category_source=aimc_category_source,
+            min_investment=min_investment,
+            min_redemption=min_redemption,
+            min_balance=min_balance,
+            redemption_period=redemption_period,
             as_of_date=as_of_date,
             last_updated_at=last_updated_at,
             data_source=fund.data_source,  # Now available from schema
             data_version=fund.data_snapshot_id,
         )
+    
+    async def _get_investment_constraints(self, proj_id: str) -> dict | None:
+        """
+        Fetch investment constraints from SEC API.
+        
+        Args:
+            proj_id: Fund project ID
+            
+        Returns:
+            Dictionary with investment constraints or None if unavailable
+        """
+        from app.utils.sec_api_client import SECAPIClient
+        
+        try:
+            client = SECAPIClient()
+            data_list, error = client.fetch_investment(proj_id)
+            if data_list and not error and len(data_list) > 0:
+                # Return first item (or could implement class selection)
+                return data_list[0]
+        except Exception:
+            pass
+        return None
+    
+    async def _get_redemption_data(self, proj_id: str) -> dict | None:
+        """
+        Fetch redemption data from SEC API.
+        
+        Args:
+            proj_id: Fund project ID
+            
+        Returns:
+            Dictionary with redemption data or None if unavailable
+        """
+        from app.utils.sec_api_client import SECAPIClient
+        
+        try:
+            client = SECAPIClient()
+            data, error = client.fetch_redemption(proj_id)
+            if data and not error:
+                return data
+        except Exception:
+            pass
+        return None
+    
+    @staticmethod
+    def _format_redemption_period(redemption_data: dict) -> str | None:
+        """
+        Format redemption period for display.
+        
+        SEC API redemp_period codes:
+        1 = Every business day
+        2 = Every week
+        3 = Every 2 weeks
+        4 = Every month
+        5 = Every quarter
+        6 = Every 6 months
+        7 = Every year
+        8 = At maturity
+        9 = Other (see redemp_period_oth)
+        E = Not specified
+        T = According to conditions
+        """
+        REDEMPTION_PERIOD_MAP = {
+            '1': 'Every business day',
+            '2': 'Weekly',
+            '3': 'Every 2 weeks',
+            '4': 'Monthly',
+            '5': 'Quarterly',
+            '6': 'Every 6 months',
+            '7': 'Annually',
+            '8': 'At maturity',
+            'E': 'Not specified',
+            'T': 'Per fund conditions',
+        }
+        
+        period_code = redemption_data.get('redemp_period')
+        if not period_code or period_code == '-':
+            return None
+        
+        if period_code == '9':
+            # Use the "other" description
+            other_desc = redemption_data.get('redemp_period_oth')
+            if other_desc and other_desc != '-':
+                return other_desc
+            return 'Other'
+        
+        return REDEMPTION_PERIOD_MAP.get(period_code, period_code)
+    
+    @staticmethod
+    def _format_currency_amount(amount: str | float | int) -> str:
+        """
+        Format currency amount for display with thousand separators.
+        
+        Args:
+            amount: Amount as string, float, or int
+            
+        Returns:
+            Formatted string with thousand separators
+        """
+        try:
+            # Convert to float first
+            num = float(amount)
+            # Format with thousand separators, no decimals if whole number
+            if num == int(num):
+                return f"{int(num):,}"
+            else:
+                return f"{num:,.2f}"
+        except (ValueError, TypeError):
+            return str(amount)
     
     @staticmethod
     def _calculate_fee_band(expense_ratio: Decimal | None) -> str | None:

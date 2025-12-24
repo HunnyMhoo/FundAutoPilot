@@ -12,10 +12,47 @@ The application consists of:
 ## 2. Implemented Features (User-Visible)
 
 ### Fund Catalog Browse
-- **What it does**: Displays paginated list of active mutual funds with fund name, AMC, category, risk level, and expense ratio
+- **What it does**: Displays paginated list of active mutual funds with fund name, AMC, category, risk level, and AIMC classification type
 - **Where it lives**: `frontend/app/funds/page.tsx`, `frontend/components/FundCatalog/`
-- **How to verify**: Navigate to `/funds` route, see paginated fund cards with "Load More" button
-- **Current limitations**: Fund detail page (`/funds/[fundId]`) shows placeholder only
+- **How to verify**: Navigate to `/funds` route, see paginated fund cards with "Load More" button. Fund cards show Risk and AIMC Type (Fee column removed).
+- **Current limitations**: None
+
+### AIMC Fund Classification
+- **What it does**: Displays AIMC (Association of Investment Management Companies) fund classification category for each fund. Uses AIMC CSV as primary source (57% coverage), falls back to SEC API code mapping (37% coverage) with visual indicator (*). Classification shown in fund catalog cards and fund detail page.
+- **Where it lives**: 
+  - Backend: `backend/app/models/fund_orm.py` (database columns: `aimc_category`, `aimc_code`, `aimc_category_source`), `backend/app/services/ingestion/ingest_aimc_categories.py` (ingestion script), `backend/app/services/ingestion/migrate_aimc_columns.py` (migration script)
+  - Frontend: `frontend/components/FundCatalog/FundCard.tsx` (catalog display), `frontend/components/FundDetail/KeyFactsCard.tsx` (detail page display)
+- **How to verify**: 
+  - Fund catalog cards show "AIMC Type" column with category name (e.g., "Equity Large Cap", "Japan Equity")
+  - SEC_API fallback shows asterisk (*) indicator
+  - Fund detail page shows AIMC Type in Tier 1 hero section
+  - Database contains `aimc_category` field populated for 94% of funds (3,139 from AIMC CSV, 2,040 from SEC API fallback)
+- **Current limitations**: 6% of funds (330) have no AIMC classification available
+
+### Fund Detail Page
+- **What it does**: Displays comprehensive fund information including fund classification (Risk Level, AIMC Type, Expense Ratio) and investment requirements (minimum investment, redemption, balance, redemption period). Two-tier layout: Tier 1 shows hero metrics in card grid, Tier 2 shows investment requirements.
+- **Where it lives**: `frontend/app/funds/[fundId]/page.tsx`, `frontend/components/FundDetail/FundDetailView.tsx`, `frontend/components/FundDetail/KeyFactsCard.tsx`
+- **How to verify**: Click on any fund card, see fund detail page with:
+  - Fund name, AMC, category in header
+  - "Fund Classification" section with Risk Level (badge), AIMC Type (with * if SEC_API fallback), Expense Ratio
+  - "Investment Requirements" section with minimum investment, redemption, balance, and redemption period (when available)
+  - "Add to Compare" button
+  - Data freshness badge
+- **Current limitations**: Investment constraints fetched on-demand from SEC API (may be slow for first load)
+
+### Compare Funds (US-N6)
+- **What it does**: Compare 2-3 funds side-by-side with fees breakdown (front-end, back-end, switching, ongoing), risk levels, dealing constraints (cut-off times, minimums, settlement), and distribution data. Persistent compare tray at bottom of screen shows selected funds with add/remove functionality. URL-first state management enables shareable comparison links.
+- **Where it lives**: 
+  - Backend: `backend/app/services/compare_service.py`, `backend/app/api/funds.py` (GET `/funds/compare`), `backend/app/utils/fee_grouping.py`
+  - Frontend: `frontend/app/compare/page.tsx`, `frontend/components/Compare/` (CompareTray, ComparePage, CompareFundColumn, useCompareState)
+- **How to verify**: 
+  - Add funds to compare from catalog cards or detail pages using "+ Compare" button
+  - Compare tray appears at bottom showing selected funds (max 3)
+  - Click "Compare" button to view side-by-side comparison at `/compare?ids=<id1>,<id2>`
+  - Verify fee groups (Front-end fee, Back-end fee, Ongoing fees, etc.)
+  - Verify missing data shows "Not available" with tooltips
+  - Copy and share URL - comparison persists on reload
+- **Current limitations**: Class selector not implemented (uses deterministic default class selection)
 
 ### Search Funds
 - **What it does**: Case-insensitive search across fund names and abbreviations with debounced input, multi-tier ranking (exact match → prefix match → substring match), search-specific empty state with clear action
@@ -44,6 +81,7 @@ The application consists of:
 - Handler: `list_funds()` in `backend/app/api/funds.py`
 - Query parameters: `limit` (1-100, default 25), `cursor`, `sort`, `q` (search), `amc[]`, `category[]`, `risk[]`, `fee_band[]`
 - Returns: `FundListResponse` with items, next_cursor, as_of_date, data_snapshot_id
+- Share class support: Returns separate entries for each share class. `fund_id` in response uses `class_abbr_name` when available, otherwise `proj_id`.
 
 **GET /funds/count** (`backend/app/api/funds.py` lines 47-54)
 - Purpose: Get total count of active funds
@@ -73,6 +111,23 @@ The application consists of:
 - Purpose: Root endpoint with API info
 - Returns: API message, version, docs URL
 
+**GET /funds/{fund_id}** (`backend/app/api/funds.py` lines 227-277)
+- Purpose: Get detailed fund information by fund_id
+- Handler: `get_fund_by_id()` in `backend/app/api/funds.py`
+- Path parameter: `fund_id` - Can be class_abbr_name (e.g., "K-INDIA-A(A)") or proj_id for backward compatibility. URL-encoded characters (e.g., `%26` for `&`) are automatically decoded.
+- Returns: `FundDetail` with fund information including AIMC classification, risk level, expense ratio, and investment constraints (minimum investment, redemption, balance, redemption period)
+- Share class support: Supports lookup by class name. Returns class name as `fund_id` when class exists.
+- Investment constraints: Fetches minimum investment, redemption, and balance from SEC API `/fund/{proj_id}/investment` endpoint
+- Redemption period: Fetches redemption period from SEC API `/fund/{proj_id}/redemption` endpoint and formats for display
+
+**GET /funds/compare** (`backend/app/api/funds.py`)
+- Purpose: Compare 2-3 funds side-by-side with detailed comparison data
+- Handler: `compare_funds()` in `backend/app/api/funds.py`
+- Query parameters: `ids` - Comma-separated fund IDs (2-3 funds required)
+- Returns: `CompareFundsResponse` with funds array (identity, risk, fees grouped by category, dealing constraints, distribution), missing_flags per fund, errors array for non-fatal issues
+- Validation: Enforces 2-3 funds, removes duplicates, validates fund IDs
+- Error handling: Returns 400 for invalid number of funds, 404 for not found, 500 for server errors
+
 **GET /health** (`backend/main.py` lines 40-43)
 - Purpose: Health check endpoint
 - Returns: `{"status": "healthy"}`
@@ -88,18 +143,23 @@ The application consists of:
 - Fields: `name_th`, `name_en`, `last_upd_date`
 - Relationship: One-to-many with `fund`
 
-`fund` (`backend/app/models/fund_orm.py` lines 28-75)
-- Primary key: `proj_id` (String(50))
+`fund` (`backend/app/models/fund_orm.py` lines 33-90)
+- Primary key: Composite `(proj_id, class_abbr_name)` - Supports share classes as separate funds
 - Foreign key: `amc_id` → `amc.unique_id`
-- Fields: `fund_name_th`, `fund_name_en`, `fund_abbr`, `fund_status` (required), `regis_date`, `category`, `risk_level`, `expense_ratio`, `last_upd_date`, `data_snapshot_id`
-- Normalized search fields: `fund_name_norm`, `fund_abbr_norm` (nullable, not currently populated)
+- Fields: `proj_id` (String(50)), `class_abbr_name` (String(50), empty string for funds without classes), `fund_name_th`, `fund_name_en`, `fund_abbr`, `fund_status` (required), `regis_date`, `category`, `risk_level`, `risk_level_int`, `risk_level_desc`, `risk_last_upd_date`, `expense_ratio`, `expense_ratio_last_upd_date`, `fee_data_raw` (JSONB), `fee_data_last_upd_date`, `last_upd_date`, `data_snapshot_id`, `data_source`, `aimc_category` (String(100)), `aimc_code` (String(20)), `aimc_category_source` (String(20))
+- Normalized search fields: `fund_name_norm`, `fund_abbr_norm` (populated during ingestion)
+- AIMC classification: `aimc_category` stores display category name, `aimc_code` stores raw SEC API code, `aimc_category_source` indicates source ('AIMC_CSV' or 'SEC_API')
+- Share class support: Funds with multiple share classes (e.g., K-INDIA-A(A), K-INDIA-A(D)) are stored as separate records with same `proj_id` but different `class_abbr_name`. Class name used as `fund_abbr` and `fund_id` in API responses.
 - Indexes:
   - `idx_fund_name_asc` on (`fund_name_en`, `proj_id`)
   - `idx_fund_status` on (`fund_status`)
   - `idx_fund_search` on (`fund_name_norm`, `fund_abbr_norm`)
+  - `idx_fund_class_abbr` on (`class_abbr_name`) - For lookup by class name
   - `idx_fund_category` on (`fund_status`, `category`) - Composite for filtering + aggregation (US-N3)
   - `idx_fund_risk` on (`fund_status`, `risk_level`) - Composite for filtering + aggregation (US-N3)
+  - `idx_fund_risk_int` on (`fund_status`, `risk_level_int`) - Composite for filtering + aggregation (US-N4)
   - `idx_fund_amc` on (`fund_status`, `amc_id`) - For AMC filtering and aggregation (US-N3)
+  - `idx_fund_aimc_category` on (`fund_status`, `aimc_category`) - For AIMC category filtering
 
 `amc` (`backend/app/models/fund_orm.py` lines 11-30)
 - Primary key: `unique_id` (String(20))
@@ -108,14 +168,19 @@ The application consists of:
 - Indexes:
   - `idx_amc_name_search` on (`name_en`, `name_th`) - For typeahead search (US-N3)
 
-**Migration/Seeding**: Tables created via `Base.metadata.create_all()` in ingestion script (`backend/app/services/ingestion/ingest_funds.py` line 194). No Alembic migrations present.
+**Migration/Seeding**: Tables created via `Base.metadata.create_all()` in ingestion script (`backend/app/services/ingestion/ingest_funds.py` line 194). Schema migrations handled via `backend/app/services/ingestion/migrate_schema.py` script (adds columns, updates primary keys, creates indexes). AIMC classification columns added via `backend/app/services/ingestion/migrate_aimc_columns.py` script. No Alembic migrations present.
 
 ### Business Logic / Domain Services
 
 **FundService** (`backend/app/services/fund_service.py`)
-- `list_funds()`: Cursor-based pagination with keyset method, supports nullable sort columns, handles search via Elasticsearch (with SQL fallback), applies filters (AMC, category, risk, fee_band), supports 6 sort options
+- `list_funds()`: Cursor-based pagination with keyset method, supports nullable sort columns, handles search via Elasticsearch (with SQL fallback), applies filters (AMC, category, risk, fee_band), supports 6 sort options. Returns separate entries for each share class with class name as `fund_id`. Includes AIMC classification fields in response.
 - `_list_funds_elasticsearch()`: Uses Elasticsearch search backend with automatic fallback to SQL when ES index is empty
 - `_list_funds_sql()`: SQL-based search using normalized fields with fallback to raw fields when normalized is NULL
+- `get_fund_by_id()`: Supports lookup by class_abbr_name (e.g., "K-INDIA-A(A)") or proj_id. Returns class name as `fund_id` when class exists. Fetches investment constraints and redemption period from SEC API on-demand. Returns AIMC classification with source indicator.
+- `_get_investment_constraints()`: Fetches investment constraints (minimum investment, redemption, balance) from SEC API `/fund/{proj_id}/investment` endpoint
+- `_get_redemption_data()`: Fetches redemption period data from SEC API `/fund/{proj_id}/redemption` endpoint
+- `_format_redemption_period()`: Formats SEC API redemption period codes (1-9, E, T) into human-readable text (e.g., "Every business day", "Monthly")
+- `_format_currency_amount()`: Formats currency amounts with thousand separators
 - `get_fund_count()`: Counts active funds (status="RG")
 - `get_categories_with_counts()`: Returns distinct categories with counts using Elasticsearch aggregation (with SQL fallback), ordered by count desc then alphabetically, excludes nulls (US-N3)
 - `get_risks_with_counts()`: Returns distinct risk levels with counts using Elasticsearch aggregation (with SQL fallback), ordered ascending (numeric if possible), excludes nulls (US-N3)
@@ -143,18 +208,55 @@ The application consists of:
 - `fetch_amcs()`: Fetches all AMCs from SEC Thailand API
 - `fetch_funds_for_amc()`: Fetches funds for a specific AMC
 - `store_amcs()`: Upserts AMCs with conflict resolution
-- `store_funds()`: Upserts active funds (status="RG") with category inference from name patterns, populates `fund_name_norm` and `fund_abbr_norm` using normalization utility, syncs to Elasticsearch index
+- `store_funds()`: Upserts active funds (status="RG") with category inference from name patterns, populates `fund_name_norm` and `fund_abbr_norm` using normalization utility, syncs to Elasticsearch index. For funds with share classes, fetches class_fund data and creates separate records for each class using composite key `(proj_id, class_abbr_name)`. Uses class name as `fund_abbr` for display.
+- `_store_fund_record()`: Helper method to store individual fund record (for specific class or fund without classes)
 - `_infer_category()`: Keyword-based categorization (Equity, Fixed Income, Money Market, Mixed, Property/REIT, Commodity, Foreign Investment)
 - Rate limiting: 100ms delay between requests (safe for 3000/300s limit)
 - Snapshot tracking: Creates `data_snapshot_id` timestamp per ingestion run
 
+**AIMCCategoryIngester** (`backend/app/services/ingestion/ingest_aimc_categories.py`)
+- `ingest_aimc_data()`: Ingests AIMC classification data from AIMC CSV file and SEC API codes
+- Matching strategy: Direct match by fund abbreviation, normalized match (removes spaces/dashes), fallback to SEC API code mapping
+- Stores both AIMC CSV category (primary) and SEC API code (for reference) with source tracking
+- Coverage: 57% from AIMC CSV (3,139 funds), 37% from SEC API fallback (2,040 funds), 6% unmatched (330 funds)
+- SEC code mapping: Maps 44 unique SEC API codes to AIMC category names (e.g., "JPEQ" → "Japan Equity", "EG" → "Equity General")
+
+**CompareService** (`backend/app/services/compare_service.py`)
+- `compare_funds()`: Aggregates comparison data for 2-3 funds, fetches data from database and SEC API, applies class selection logic, groups fees into categories, structures response with missing flags and data freshness
+- Class selection: Deterministic rule (exact match of fund_abbr, then prefer None/"/main", then alphabetical)
+- Data sources: Fund identity from database, fees from `fee_data_raw` JSONB (cached) or SEC API, risk from database, dealing constraints from SEC API (`/redemption`, `/investment`), distribution from SEC API (`/dividend`)
+- Partial success: Returns available sections even if some fail, populates `missing_flags` and `errors` array
+
+**Fee Grouping Utility** (`backend/app/utils/fee_grouping.py`)
+- `categorize_fee()`: Classifies fee rows into categories (front_end, back_end, switching, ongoing, other) based on fee_type_desc keywords (case-insensitive)
+- `get_category_display_label()`: Returns user-friendly labels for fee categories
+- `group_fees()`: Groups fee rows by category, preserves all fee row fields
+- `select_default_class()`: Deterministic class selection from list of class-specific data (exact match, then prefer fund-level, then alphabetical)
+
+**SECAPIClient** (`backend/app/utils/sec_api_client.py`)
+- `fetch_redemption()`: Fetches redemption/dealing constraints data from `/fund/{proj_id}/redemption`
+- `fetch_investment()`: Fetches investment constraints (minimums) from `/fund/{proj_id}/investment` (returns array per class)
+- `fetch_dividend()`: Fetches dividend/distribution data from `/fund/{proj_id}/dividend` (returns array per class)
+
 ### Integrations
 
-**SEC Thailand API** (`backend/app/services/ingestion/ingest_funds.py`)
+**SEC Thailand API** (`backend/app/services/ingestion/ingest_funds.py`, `backend/app/utils/sec_api_client.py`)
 - Base URL: `https://api.sec.or.th/FundFactsheet`
-- Endpoints used: `/fund/amc`, `/fund/amc/{amc_id}`
+- Endpoints used: 
+  - `/fund/amc`, `/fund/amc/{amc_id}`, `/fund/{proj_id}/class_fund` (for share class data) - ingestion
+  - `/fund/{proj_id}/suitability` - risk level data (enrichment)
+  - `/fund/{proj_id}/fee` - fee data (enrichment)
+  - `/fund/{proj_id}/redemption` - redemption/dealing constraints (compare feature, fund detail page)
+  - `/fund/{proj_id}/investment` - investment minimums (compare feature, fund detail page)
+  - `/fund/{proj_id}/dividend` - distribution/dividend data (compare feature)
+  - `/fund/{proj_id}/fund_compare` - AIMC classification code (ingestion)
 - Authentication: `Ocp-Apim-Subscription-Key` header from `SEC_FUND_FACTSHEET_API_KEY` env var
 - Configuration: `backend/app/core/config.py` (lines 14-15)
+- `SECAPIClient.fetch_class_fund()`: Fetches share class data for a fund, returns list of class objects with `class_abbr_name` and `class_name`
+- `SECAPIClient.fetch_redemption()`: Fetches redemption/dealing constraints (cut-off times, settlement period, redemption period codes)
+- `SECAPIClient.fetch_investment()`: Fetches investment constraints (minimum subscription/redemption/balance) per class
+- `SECAPIClient.fetch_dividend()`: Fetches dividend/distribution data (policy, recent dividends) per class
+- `SECAPIClient.fetch_fund_compare()`: Fetches AIMC classification code from SEC API (returns code like "JPEQ", "EG", "USEQ")
 
 **Elasticsearch** (`backend/app/services/search/elasticsearch_backend.py`)
 - Index: `funds` with custom analyzers for Thai/English text
@@ -175,9 +277,14 @@ The application consists of:
 - Metadata: Title and description for SEO
 
 **Fund Detail Page** (`frontend/app/funds/[fundId]/page.tsx`)
-- Placeholder implementation only
-- Shows "Full fund details will be available in US4" message
-- Navigation: Back link to catalog
+- Renders `FundDetailView` component with full fund information
+- URL decoding: Automatically decodes URL-encoded fund IDs (e.g., `%26` → `&`)
+- Navigation: Back link to catalog with state preservation
+
+**Compare Page** (`frontend/app/compare/page.tsx`)
+- Server-side route with async searchParams (Next.js 15)
+- Validates 2-3 funds requirement, renders ComparePage component
+- Metadata: Title and description for SEO
 
 ### Components
 
@@ -187,13 +294,40 @@ The application consists of:
 - States: loading_initial, loaded, error_initial, loading_more, error_load_more, end_of_results, idle
 - Uses `useFundCatalog` hook for state management
 
+**CompareTray** (`frontend/components/Compare/CompareTray.tsx`)
+- Fixed bottom bar showing selected funds (1-3 max) as chips with remove buttons
+- Displays count ("2/3 selected"), "Clear all" button, and "Compare" button (enabled when 2-3 funds selected)
+- Fetches fund names for display in chips, hidden on `/compare` page itself
+- Uses `useCompareState` hook for URL-first state management
+
+**ComparePage** (`frontend/components/Compare/ComparePage.tsx`)
+- Side-by-side comparison page for 2-3 funds
+- Sections: Fund Information, Risk & Suitability, Fees (grouped), Dealing Constraints, Distribution
+- Handles loading, error, and invalid states (redirects if <2 or >3 funds)
+- Displays non-fatal errors in banner
+
+**CompareFundColumn** (`frontend/components/Compare/CompareFundColumn.tsx`)
+- Individual fund column in side-by-side comparison
+- Renders all comparison sections with consistent styling
+- Shows "Not available" with tooltips for missing data
+- Displays fee groups (Front-end fee, Back-end fee, Ongoing fees, etc.) with individual fee rows
+
+**useCompareState** (`frontend/components/Compare/useCompareState.ts`)
+- URL-first state management hook for compare selection
+- Stores selection in URL query parameter `ids` (comma-separated)
+- Provides addFund, removeFund, clearAll methods
+- Shareable URLs, reload-safe, preserves order
+
 **EmptyState** (`frontend/components/FundCatalog/EmptyState.tsx`)
 - Search-specific empty state: Shows "No funds match '<query>'" with helpful message and "Clear search" button
 - Generic empty state: Shows "No funds available" when no search query
 
 **FundCard** (`frontend/components/FundCatalog/FundCard.tsx`)
-- Displays individual fund summary (name, AMC, category, risk, fee)
-- Links to fund detail page
+- Displays individual fund summary (name, AMC, category, risk, AIMC type)
+- Two-column grid: Risk and AIMC Type (Fee column removed)
+- AIMC Type displayed in green color with asterisk (*) indicator for SEC_API fallback
+- Compare button: Inline icon button (+ / ✓) in header row next to fund name
+- Links to fund detail page with state preservation
 
 **FilterPanel** (`frontend/components/FundCatalog/FilterPanel.tsx`)
 - Sidebar with filter sections: Category, Risk Level, Fees, AMC
@@ -223,6 +357,17 @@ The application consists of:
 **SkeletonLoader** (`frontend/components/FundCatalog/SkeletonLoader.tsx`)
 - Loading skeleton for initial load
 
+**FundDetailView** (`frontend/components/FundDetail/FundDetailView.tsx`)
+- Main fund detail page component with header, fund name, AMC, category, and "Add to Compare" button
+- Handles loading, error, and not-found states
+- Navigation: Back link to catalog with state preservation
+
+**KeyFactsCard** (`frontend/components/FundDetail/KeyFactsCard.tsx`)
+- Two-tier layout for fund information display
+- Tier 1 (Fund Classification): Three-column hero grid showing Risk Level (badge), AIMC Type (with fallback indicator), Expense Ratio
+- Tier 2 (Investment Requirements): Grid showing Minimum Investment, Minimum Redemption, Minimum Balance, and Redemption Period (when available)
+- Fallback note: Shows indicator when AIMC category is derived from SEC API
+
 ### State Management
 
 **useFundCatalog Hook** (`frontend/components/FundCatalog/useFundCatalog.ts`)
@@ -240,14 +385,16 @@ The application consists of:
 - `fetchCategories()`: Calls `/funds/categories` endpoint, returns `CategoryListResponse` (US-N3)
 - `fetchRisks()`: Calls `/funds/risks` endpoint, returns `RiskListResponse` (US-N3)
 - `fetchAMCs()`: Calls `/funds/amcs` endpoint with optional search, limit, and cursor params, returns `AMCListResponse` (US-N3)
+- `fetchCompareFunds()`: Calls `/funds/compare` endpoint with fund IDs array, validates 2-3 funds, returns `CompareFundsResponse`
 - Uses `NEXT_PUBLIC_API_URL` env var (defaults to `http://localhost:8000`)
 - Real API integration (not mocked)
 
 ### Navigation/Routing
 
 - Next.js App Router with file-based routing
-- Routes: `/` (home), `/funds` (catalog), `/funds/[fundId]` (detail)
+- Routes: `/` (home), `/funds` (catalog), `/funds/[fundId]` (detail), `/compare` (compare page)
 - Client-side navigation via Next.js `Link` component
+- URL-first state management for compare selection (shareable URLs)
 
 ## 5. AI / LLM Integration Status (If Applicable)
 
@@ -317,7 +464,7 @@ docker-compose up --build
 
 **Backend Tests** (`backend/tests/`):
 - Framework: pytest with pytest-asyncio
-- Test files: `test_funds_api.py`, `test_filter_metadata_api.py`
+- Test files: `test_funds_api.py`, `test_filter_metadata_api.py`, `test_compare_api.py`, `test_fee_grouping.py`
 - Test coverage:
   - `TestListFunds`: Success cases, filters, sort, cursor pagination, limit validation, empty results
   - `TestHealthCheck`: Health endpoint
@@ -326,7 +473,10 @@ docker-compose up --build
   - `TestGetRisks`: Success with counts, excludes nulls, ordering, empty results (US-N3)
   - `TestGetAMCs`: Basic listing, search functionality, pagination, limit validation, empty results, cursor handling, combined params (US-N3)
   - `TestFilterMetadataIntegration`: Response structure validation for all filter metadata endpoints (US-N3)
-- Mocking: Uses `unittest.mock` to mock `FundService`
+  - `TestCompareFunds`: Success with 2-3 funds, validation (too many/few), duplicate handling, whitespace trimming, order preservation, error handling (404, 500, validation errors)
+  - `TestCategorizeFee`: Front-end/back-end/switching/ongoing/other keyword recognition, case-insensitive matching, partial keyword matching
+  - `TestGroupFees`: Fee grouping by category, empty list handling, field preservation
+- Mocking: Uses `unittest.mock` to mock services
 - Test client: httpx `AsyncClient` with `ASGITransport`
 
 **Frontend Tests**: None found
@@ -362,25 +512,38 @@ No coverage tools or reports found in codebase.
 
 **Dashboards**: None present
 
-## 9. Known Gaps / Not Implemented Yet
+## 9. Implemented Features (Recent)
+
+### Share Class Support
+- **What it does**: Treats share classes (e.g., K-INDIA-A(A), K-INDIA-A(D)) as separate funds for presentation, matching industry standard (WealthMagik pattern)
+- **Where it lives**: 
+  - Database: Composite primary key `(proj_id, class_abbr_name)` in `backend/app/models/fund_orm.py`
+  - Ingestion: `backend/app/services/ingestion/ingest_funds.py` fetches class_fund data and creates separate records
+  - Enrichment: `backend/app/services/ingestion/enrich_funds.py` calculates class-specific expense ratios
+  - API: `backend/app/services/fund_service.py` supports lookup by class name, returns class name as `fund_id`
+- **How to verify**: 
+  - Search for "K-INDIA" returns separate entries for K-INDIA-A(A) and K-INDIA-A(D)
+  - `GET /funds/K-INDIA-A(A)` returns fund with class-specific data
+  - Database shows separate records with same `proj_id` but different `class_abbr_name`
+- **Current limitations**: Full re-ingestion required to populate class data for all funds. Base fund records (with empty `class_abbr_name`) may exist alongside class records.
+
+## 10. Known Gaps / Not Implemented Yet
 
 ### Product Gaps (UX/Workflows)
 
-- Fund detail page is placeholder only (`frontend/app/funds/[fundId]/page.tsx` shows "Full fund details will be available in US4")
 - Home page is default Next.js template, not customized for project
-- No compare tray functionality (mentioned in US1 as out of scope)
 - No user authentication or personalization
 - No trending/popularity ranking
 
 ### Backend Gaps
 
 **Data Ingestion**:
-- Risk level and expense ratio are set to NULL in ingestion (lines 124-125 of `ingest_funds.py`) - requires additional API calls per fund
-- No database migrations system (Alembic) - tables created via `create_all()`
+- Risk level and expense ratio are set to NULL in ingestion (lines 124-125 of `ingest_funds.py`) - requires additional API calls per fund via enrichment process
+- No database migrations system (Alembic) - tables created via `create_all()`, schema changes handled via custom migration script
 
 **API Endpoints**:
-- Individual fund detail endpoint exists (`GET /funds/{fund_id}`) - implemented in previous work
-- No fund comparison endpoint
+- Individual fund detail endpoint exists (`GET /funds/{fund_id}`) - supports lookup by class name or proj_id
+- Fund comparison endpoint exists (`GET /funds/compare`) - accepts 2-3 fund IDs, returns side-by-side comparison data with fees, risk, dealing constraints, and distribution
 - No switch impact simulation endpoint (core product feature)
 
 **Business Logic**:
@@ -427,7 +590,7 @@ Not applicable.
 - No error tracking service integration (Sentry, etc.)
 - No performance monitoring (APM)
 
-## 10. Next Best Tasks (Small, Testable Increments)
+## 11. Next Best Tasks (Small, Testable Increments)
 
 1. **[DONE] Populate normalization fields during ingestion**: Normalization utility created (`backend/app/utils/normalization.py`), ingestion script updated to populate `fund_name_norm` and `fund_abbr_norm`.
 
@@ -439,9 +602,11 @@ Not applicable.
 
 5. **Populate Elasticsearch index**: Run ingestion script to sync fund data to Elasticsearch for full multi-tier ranking. Verify by searching and checking result order prioritizes exact matches.
 
-6. **Create fund detail API endpoint**: Add `GET /funds/{fund_id}` in `backend/app/api/funds.py` returning full fund details. Add test in `test_funds_api.py`. Verify via API docs at `/docs`.
+6. **[DONE] Create fund detail API endpoint**: `GET /funds/{fund_id}` endpoint exists in `backend/app/api/funds.py` returning `FundDetail` with AIMC classification and investment constraints. Verified via API docs at `/docs`.
 
-7. **Implement fund detail page**: Replace placeholder in `frontend/app/funds/[fundId]/page.tsx` with real data fetch and display. Verify by clicking fund card and seeing details.
+7. **[DONE] Implement fund detail page**: Fund detail page implemented in `frontend/app/funds/[fundId]/page.tsx` with `FundDetailView` component showing two-tier layout (Fund Classification and Investment Requirements). URL decoding for fund IDs with special characters. Verified by clicking fund card and seeing full details.
+
+18. **[DONE] Implement AIMC fund classification**: Added database columns (`aimc_category`, `aimc_code`, `aimc_category_source`), migration script, ingestion script matching AIMC CSV (3,139 funds) and SEC API codes (2,040 funds), frontend display in catalog cards and detail page with fallback indicator. Verified by checking fund cards show AIMC Type and detail page shows classification with source tracking.
 
 8. **Add database migrations**: Set up Alembic in `backend/`, create initial migration from existing schema. Verify by running migration on fresh database.
 
@@ -455,11 +620,19 @@ Not applicable.
 
 13. **Add frontend error boundary**: Create error boundary component to catch React errors. Verify by intentionally causing error and seeing boundary.
 
-14. **Populate risk level and expense ratio**: Extend ingestion to fetch per-fund details from SEC API (may require additional endpoint). Add rate limiting consideration. Verify by checking database has non-null values.
+14. **[DONE] Populate risk level and expense ratio**: Enrichment process implemented (`backend/app/services/ingestion/enrich_funds.py`) to fetch risk level from `/fund/{proj_id}/suitability` and expense ratio from `/fund/{proj_id}/fee`. Supports class-specific expense ratio calculation. Raw fee data stored in `fee_data_raw` JSONB column for analysis. Verified with K-INDIA showing 1.85% expense ratio for both classes.
 
 15. **Add API request logging**: Add structured logging middleware to FastAPI for request/response logging. Verify by checking logs during API calls.
 
-## 11. Appendix: Evidence Index
+15. **[DONE] Implement share class support**: Added `class_abbr_name` field to Fund model, updated primary key to composite `(proj_id, class_abbr_name)`, modified ingestion to fetch and create separate records for each share class, updated enrichment to handle class-specific calculations, updated API to support class-based lookups. Tested with K-INDIA showing separate entries for K-INDIA-A(A) and K-INDIA-A(D). Verified by checking API returns class names as `fund_id` and list funds shows separate entries.
+
+16. **[DONE] Implement fund comparison feature (US-N6)**: Created CompareService, compare API endpoint, fee grouping utility, compare data models, frontend CompareTray component, compare page with side-by-side layout, compare state hook with URL-first approach, "Add to Compare" buttons on FundCard and FundDetailView. Backend tests (26/26 passing) cover compare endpoint and fee grouping. Verified by adding 2-3 funds to compare, viewing side-by-side comparison with fees grouped by category, dealing constraints, and distribution data.
+
+17. **Full re-ingestion for share classes**: Run ingestion script to populate class data for all funds with share classes. Verify by checking database has separate records for funds with multiple classes.
+
+18. **Cleanup base fund records**: Remove base fund records (with empty `class_abbr_name`) for funds that have share classes. Verify by checking no duplicate entries in fund list.
+
+## 12. Appendix: Evidence Index
 
 ### Backend Files
 - `backend/main.py` - FastAPI application entry point
@@ -471,13 +644,22 @@ Not applicable.
 - `backend/app/services/ingestion/ingest_funds.py` - SEC Thailand data ingestion script with ES sync
 - `backend/app/utils/__init__.py` - Utils module exports
 - `backend/app/utils/normalization.py` - Text normalization utility for search
-- `backend/app/models/fund_orm.py` - SQLAlchemy ORM models (includes filter metadata indexes for US-N3)
-- `backend/app/models/fund.py` - Pydantic request/response schemas (includes CategoryItem, RiskItem, AMCItem, CategoryListResponse, RiskListResponse, AMCListResponse for US-N3)
+- `backend/app/models/fund_orm.py` - SQLAlchemy ORM models (includes composite primary key for share classes, filter metadata indexes for US-N3)
+- `backend/app/services/ingestion/migrate_schema.py` - Database schema migration script (adds columns, updates primary keys)
+- `backend/app/services/ingestion/migrate_aimc_columns.py` - Migration script for AIMC classification columns
+- `backend/app/services/ingestion/ingest_aimc_categories.py` - AIMC classification ingestion script (matches AIMC CSV and SEC API codes)
+- `backend/app/utils/sec_api_client.py` - SEC API client with `fetch_class_fund()` method for share class data and `fetch_fund_compare()` for AIMC codes
+- `backend/app/services/ingestion/enrich_funds.py` - Fund enrichment service (risk level and expense ratio with class-specific support)
+- `backend/app/services/compare_service.py` - Compare service aggregating fund comparison data (US-N6)
+- `backend/app/utils/fee_grouping.py` - Fee categorization and grouping utility (US-N6)
+- `backend/app/models/fund.py` - Pydantic request/response schemas (includes CategoryItem, RiskItem, AMCItem, CategoryListResponse, RiskListResponse, AMCListResponse for US-N3, CompareFundsResponse, CompareFundData, FeeGroup, DealingConstraints, DistributionData for US-N6, AIMC classification fields and investment constraints for FundDetail and FundSummary)
 - `backend/app/core/config.py` - Application configuration (includes Elasticsearch settings)
 - `backend/app/core/database.py` - Database connection and session management
 - `backend/app/core/elasticsearch.py` - Elasticsearch client initialization
 - `backend/tests/test_funds_api.py` - API endpoint tests
 - `backend/tests/test_filter_metadata_api.py` - Filter metadata endpoint tests (US-N3)
+- `backend/tests/test_compare_api.py` - Compare endpoint tests (US-N6)
+- `backend/tests/test_fee_grouping.py` - Fee grouping utility tests (US-N6)
 - `backend/tests/conftest.py` - Pytest configuration
 - `backend/requirements.txt` - Python dependencies (includes elasticsearch, aiohttp)
 - `backend/Dockerfile` - Backend container definition
@@ -485,16 +667,26 @@ Not applicable.
 ### Frontend Files
 - `frontend/app/page.tsx` - Home page
 - `frontend/app/funds/page.tsx` - Fund catalog page
-- `frontend/app/funds/[fundId]/page.tsx` - Fund detail page (placeholder)
-- `frontend/app/layout.tsx` - Root layout
+- `frontend/app/funds/[fundId]/page.tsx` - Fund detail page with URL decoding
+- `frontend/app/compare/page.tsx` - Compare page (US-N6)
+- `frontend/app/layout.tsx` - Root layout (includes CompareTray component)
 - `frontend/components/FundCatalog/FundCatalog.tsx` - Main catalog component with search results label
 - `frontend/components/FundCatalog/useFundCatalog.ts` - Catalog state management hook with clearSearch
 - `frontend/components/FundCatalog/FilterPanel.tsx` - Filter sidebar with API-driven options, typeahead AMC search, loading/error states (US-N3)
 - `frontend/components/FundCatalog/FilterSection.tsx` - Filter section component with conditional title rendering
 - `frontend/components/FundCatalog/SearchInput.tsx` - Search input component
 - `frontend/components/FundCatalog/EmptyState.tsx` - Search-specific and generic empty states
-- `frontend/utils/api/funds.ts` - API client functions
-- `frontend/types/fund.ts` - TypeScript type definitions
+- `frontend/components/FundCatalog/FundCard.tsx` - Fund card component with AIMC Type display and inline compare button
+- `frontend/components/FundDetail/FundDetailView.tsx` - Main fund detail view component
+- `frontend/components/FundDetail/KeyFactsCard.tsx` - Two-tier fund information display (Classification and Investment Requirements)
+- `frontend/components/FundDetail/FreshnessBadge.tsx` - Data freshness badge component
+- `frontend/components/Compare/CompareTray.tsx` - Persistent compare tray component (US-N6)
+- `frontend/components/Compare/ComparePage.tsx` - Main compare page component (US-N6)
+- `frontend/components/Compare/CompareFundColumn.tsx` - Individual fund column in comparison (US-N6)
+- `frontend/components/Compare/CompareSection.tsx` - Reusable section wrapper component (US-N6)
+- `frontend/components/Compare/useCompareState.ts` - URL-first compare state management hook (US-N6)
+- `frontend/utils/api/funds.ts` - API client functions (includes fetchCompareFunds for US-N6)
+- `frontend/types/fund.ts` - TypeScript type definitions (includes CompareFundsResponse, CompareFundData, FeeGroup, DealingConstraints, DistributionData for US-N6, AIMC classification fields and investment constraints for FundDetail and FundSummary)
 - `frontend/package.json` - Node.js dependencies and scripts
 
 ### Configuration Files
@@ -506,5 +698,10 @@ Not applicable.
 - `docs/user_story/us2.md` - User story 2: Search funds
 - `docs/user_story/us-n1.md` - User story N1: Search normalization and ranking
 - `docs/user_story/us-n3.md` - User story N3: Data-driven filter metadata (categories, risks, full AMC search)
+- `docs/user_story/us-n4.md` - User story N4: Data completeness upgrade (risk level and expense ratio)
+- `docs/user_story/us-n5.md` - User story N5: Home page funnel
+- `docs/user_story/us-n6.md` - User story N6: Compare tray and side-by-side comparison
+- `docs/user_story/us-n6-manual-verification.md` - Manual verification steps for compare feature
+- `docs/share_class_implementation_plan.md` - Share class implementation plan and approach
 - `docs/architecture_recommendations.md` - Architecture guidance
 

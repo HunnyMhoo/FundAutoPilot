@@ -13,6 +13,12 @@ class FundSummary(BaseModel):
     category: str | None = Field(None, description="Fund category/type")
     risk_level: str | None = Field(None, description="Risk level (1-8 or descriptive)")
     expense_ratio: float | None = Field(None, description="Annual expense ratio percentage")
+    aimc_category: str | None = Field(None, description="AIMC fund classification")
+    aimc_category_source: str | None = Field(None, description="Source: 'AIMC_CSV' or 'SEC_API'")
+    
+    # New fields for Fund Card badges (1.2, 1.3)
+    dividend_policy: str | None = Field(None, description="Dividend policy: 'Y' (pays dividends) or 'N' (accumulating)")
+    management_style: str | None = Field(None, description="Management style display: 'Passive' or 'Active'")
     
     class Config:
         from_attributes = True
@@ -67,6 +73,17 @@ class FundDetail(BaseModel):
     amc_name: str = Field(..., description="Asset Management Company name")
     risk_level: str | None = Field(None, description="Risk level (1-8 or descriptive)")
     expense_ratio: float | None = Field(None, description="Annual expense ratio percentage (rounded to 3 decimals)")
+    
+    # AIMC Classification (Tier 1 enhancement)
+    aimc_category: str | None = Field(None, description="AIMC fund classification category")
+    aimc_category_source: str | None = Field(None, description="Source of AIMC category: 'AIMC_CSV' or 'SEC_API'")
+    
+    # Investment Constraints (Tier 2 enhancement)
+    min_investment: str | None = Field(None, description="Minimum investment amount with currency")
+    min_redemption: str | None = Field(None, description="Minimum redemption amount with currency")
+    min_balance: str | None = Field(None, description="Minimum balance to maintain with currency")
+    redemption_period: str | None = Field(None, description="Redemption period (e.g., 'Every business day')")
+    
     as_of_date: str | None = Field(None, description="Data snapshot date (ISO format)")
     last_updated_at: str | None = Field(None, description="Last update timestamp (ISO format)")
     data_source: str | None = Field(None, description="Data source identifier")
