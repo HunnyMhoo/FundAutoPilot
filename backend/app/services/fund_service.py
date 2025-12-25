@@ -4,21 +4,25 @@ import base64
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, date
 from decimal import Decimal
 from typing import Dict, Any
 
-from sqlalchemy import select, and_, or_, func
+from sqlalchemy import select, and_, or_, func, case, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
+from app.core.database import SyncSessionLocal
 from app.models.fund_orm import Fund, AMC, FundReturnSnapshot
+from app.models.fund import FundSummary, FundListResponse, CursorData
+from app.models.peer_ranking import PeerRank
+from app.services.search.elasticsearch_backend import ElasticsearchSearchBackend
+from app.services.peer_ranking_service import PeerRankingService
+from app.services.representative_class_service import RepresentativeClassService
+from app.core.elasticsearch import get_elasticsearch_client
 
 logger = logging.getLogger(__name__)
-from app.models.fund import FundSummary, FundListResponse, CursorData
-from app.services.search.elasticsearch_backend import ElasticsearchSearchBackend
-from app.core.elasticsearch import get_elasticsearch_client
 
 settings = get_settings()
 
@@ -140,8 +144,87 @@ class FundService:
         # Fetch return snapshots for all funds (US-N10, US-N13)
         return_data = await self._fetch_return_snapshots(fund_records)
         
+        # Compute peer ranks for funds (US-N13)
+        peer_ranks = {}
+        try:
+            # Get latest as-of date for peer ranking
+            as_of_date = await self._get_latest_return_as_of_date()
+            if as_of_date and fund_records:
+                # Get unique proj_ids from fund records
+                proj_ids = list(set([fund.proj_id for fund in fund_records]))
+                
+                # Get representative classes for all funds
+                with SyncSessionLocal() as sync_session:
+                    rep_class_service = RepresentativeClassService(sync_session)
+                    rep_classes = rep_class_service.select_representative_classes_batch(proj_ids)
+                    
+                    # Build fund identifier mapping
+                    fund_record_map = {}  # Maps fund_id from doc -> Fund record
+                    for fund_record in fund_records:
+                        fund_id = fund_record.class_abbr_name if fund_record.class_abbr_name else fund_record.proj_id
+                        fund_record_map[fund_id] = fund_record
+                    
+                    # Build identifiers for peer ranking
+                    identifiers_to_compute = []
+                    doc_to_identifier = {}  # Maps doc index -> identifier
+                    
+                    for i, doc in enumerate(search_result["items"]):
+                        fund_id = doc["fund_id"]
+                        fund_record = fund_record_map.get(fund_id)
+                        
+                        if fund_record:
+                            rep_class = rep_classes.get(fund_record.proj_id)
+                            if rep_class:
+                                identifier = rep_class
+                            elif fund_record.class_abbr_name:
+                                identifier = fund_record.class_abbr_name
+                            else:
+                                identifier = fund_record.proj_id
+                            
+                            doc_to_identifier[i] = identifier
+                            if identifier not in identifiers_to_compute:
+                                identifiers_to_compute.append(identifier)
+                    
+                    # Compute peer ranks in batch
+                    ranking_service = PeerRankingService(sync_session)
+                    
+                    ranks_1y = ranking_service.compute_peer_ranks_batch(
+                        identifiers_to_compute,
+                        "1y",
+                        as_of_date
+                    )
+                    
+                    # For identifiers without 1y rank, try ytd
+                    identifiers_needing_ytd = [
+                        identifier for identifier in identifiers_to_compute
+                        if not ranks_1y.get(identifier) or ranks_1y[identifier].percentile is None
+                    ]
+                    
+                    ranks_ytd = {}
+                    if identifiers_needing_ytd:
+                        ranks_ytd = ranking_service.compute_peer_ranks_batch(
+                            identifiers_needing_ytd,
+                            "ytd",
+                            as_of_date
+                        )
+                    
+                    # Build mapping from doc index to peer rank
+                    for i in doc_to_identifier:
+                        identifier = doc_to_identifier[i]
+                        rank_result = ranks_1y.get(identifier)
+                        
+                        if rank_result and rank_result.percentile is not None:
+                            peer_ranks[i] = PeerRank.from_peer_rank_result(rank_result)
+                        else:
+                            rank_result_ytd = ranks_ytd.get(identifier)
+                            if rank_result_ytd and rank_result_ytd.percentile is not None:
+                                peer_ranks[i] = PeerRank.from_peer_rank_result(rank_result_ytd)
+        except Exception as e:
+            # Log error but continue without peer ranks
+            logger.warning(f"Failed to compute peer ranks for Elasticsearch results: {e}", exc_info=True)
+        
         items = []
-        for doc in search_result["items"]:
+        for i, doc in enumerate(search_result["items"]):
             # Find corresponding fund record for return data
             fund_id = doc["fund_id"]
             fund_record = next((f for f in fund_records if (f.class_abbr_name == fund_id) or (f.proj_id == fund_id and not f.class_abbr_name)), None)
@@ -151,6 +234,9 @@ class FundService:
             if fund_record:
                 fund_key = (fund_record.proj_id, fund_record.class_abbr_name if fund_record.class_abbr_name else "")
                 returns = return_data.get(fund_key, returns)
+            
+            # Get peer rank for this fund (US-N13)
+            peer_rank = peer_ranks.get(i)
             
             items.append(FundSummary(
                 fund_id=doc["fund_id"],
@@ -163,6 +249,7 @@ class FundService:
                 aimc_category_source=doc.get("aimc_category_source"),
                 trailing_1y_return=returns["trailing_1y_return"],  # US-N10, US-N13
                 ytd_return=returns["ytd_return"],  # US-N10, US-N13
+                peer_rank=peer_rank,  # US-N13: Peer ranking data
             ))
         
         # Get snapshot info from database
@@ -333,9 +420,84 @@ class FundService:
         # Fetch return snapshots for all funds (US-N10, US-N13)
         return_data = await self._fetch_return_snapshots(funds)
         
+        # Compute peer ranks for funds (US-N13)
+        peer_ranks = {}
+        try:
+            # Get latest as-of date for peer ranking
+            as_of_date = await self._get_latest_return_as_of_date()
+            if as_of_date:
+                # Get unique proj_ids from funds
+                proj_ids = list(set([fund.proj_id for fund in funds]))
+                
+                # Get representative classes for all funds
+                with SyncSessionLocal() as sync_session:
+                    rep_class_service = RepresentativeClassService(sync_session)
+                    rep_classes = rep_class_service.select_representative_classes_batch(proj_ids)
+                    
+                    # Build fund identifier mapping: fund -> identifier for peer ranking
+                    # Use representative class if available, otherwise use fund's own class_abbr_name or proj_id
+                    fund_identifier_map = {}  # Maps fund index -> identifier
+                    unique_identifiers = []  # List of unique identifiers to compute ranks for
+                    identifier_to_funds = {}  # Maps identifier -> list of fund indices that use it
+                    
+                    for i, fund in enumerate(funds):
+                        rep_class = rep_classes.get(fund.proj_id)
+                        if rep_class:
+                            identifier = rep_class
+                        elif fund.class_abbr_name:
+                            identifier = fund.class_abbr_name
+                        else:
+                            identifier = fund.proj_id
+                        
+                        fund_identifier_map[i] = identifier
+                        
+                        if identifier not in identifier_to_funds:
+                            unique_identifiers.append(identifier)
+                            identifier_to_funds[identifier] = []
+                        identifier_to_funds[identifier].append(i)
+                    
+                    # Compute peer ranks in batch (horizon: 1y first)
+                    ranking_service = PeerRankingService(sync_session)
+                    
+                    ranks_1y = ranking_service.compute_peer_ranks_batch(
+                        unique_identifiers,
+                        "1y",
+                        as_of_date
+                    )
+                    
+                    # For identifiers without 1y rank, try ytd
+                    identifiers_needing_ytd = [
+                        identifier for identifier in unique_identifiers
+                        if not ranks_1y.get(identifier) or ranks_1y[identifier].percentile is None
+                    ]
+                    
+                    ranks_ytd = {}
+                    if identifiers_needing_ytd:
+                        ranks_ytd = ranking_service.compute_peer_ranks_batch(
+                            identifiers_needing_ytd,
+                            "ytd",
+                            as_of_date
+                        )
+                    
+                    # Build mapping from fund index to peer rank
+                    for i, fund in enumerate(funds):
+                        identifier = fund_identifier_map[i]
+                        rank_result = ranks_1y.get(identifier)
+                        
+                        # Use 1y if available, otherwise use ytd
+                        if rank_result and rank_result.percentile is not None:
+                            peer_ranks[i] = PeerRank.from_peer_rank_result(rank_result)
+                        else:
+                            rank_result_ytd = ranks_ytd.get(identifier)
+                            if rank_result_ytd and rank_result_ytd.percentile is not None:
+                                peer_ranks[i] = PeerRank.from_peer_rank_result(rank_result_ytd)
+        except Exception as e:
+            # Log error but continue without peer ranks
+            logger.warning(f"Failed to compute peer ranks: {e}", exc_info=True)
+        
         # Build Response
         items = []
-        for fund in funds:
+        for i, fund in enumerate(funds):
             amc_name = "Unknown"
             if fund.amc:
                 amc_name = fund.amc.name_en
@@ -355,6 +517,9 @@ class FundService:
             fund_key = (fund.proj_id, fund.class_abbr_name if fund.class_abbr_name else "")
             returns = return_data.get(fund_key, {"trailing_1y_return": None, "ytd_return": None})
             
+            # Get peer rank for this fund (US-N13)
+            peer_rank = peer_ranks.get(i)
+            
             items.append(FundSummary(
                 fund_id=display_fund_id,
                 fund_name=fund.fund_name_en,
@@ -366,6 +531,7 @@ class FundService:
                 peer_focus=fund.peer_focus,  # US-N9, US-N13: For category display
                 trailing_1y_return=returns["trailing_1y_return"],  # US-N10, US-N13
                 ytd_return=returns["ytd_return"],  # US-N10, US-N13
+                peer_rank=peer_rank,  # US-N13: Peer ranking data
             ))
 
         # Build next cursor
@@ -783,7 +949,10 @@ class FundService:
         Raises:
             ValueError: If fund_id is invalid or fund not found
         """
+        import time
         from app.models.fund import FundDetail
+        
+        start_time = time.time()
         
         # Basic validation: fund_id must be non-empty
         if not fund_id or not fund_id.strip():
@@ -791,25 +960,25 @@ class FundService:
         
         fund_id = fund_id.strip()
         
-        # Try lookup by class_abbr_name first (for share classes)
-        query = (
-            select(Fund)
-            .join(AMC, Fund.amc_id == AMC.unique_id)
-            .options(selectinload(Fund.amc))
-            .where(Fund.class_abbr_name == fund_id)
-        )
-        
+        # Optimized lookup: Try class_abbr_name first, then proj_id
+        # Eagerly load AMC relationship to avoid lazy loading issues in async context
+        query = select(Fund).options(selectinload(Fund.amc)).where(Fund.class_abbr_name == fund_id)
         result = await self.db.execute(query)
         fund = result.scalar_one_or_none()
         
         # If not found by class name, try proj_id (backward compatibility)
         if fund is None:
+            # Try fund-level record first (no classes), then any share class
             query = (
                 select(Fund)
-                .join(AMC, Fund.amc_id == AMC.unique_id)
                 .options(selectinload(Fund.amc))
                 .where(Fund.proj_id == fund_id)
-                .where(Fund.class_abbr_name == "")  # Only fund-level records (no classes)
+                .order_by(
+                    # Prefer fund-level records (empty class_abbr_name) first
+                    case((Fund.class_abbr_name == "", 0), else_=1).asc(),
+                    Fund.class_abbr_name.asc()
+                )
+                .limit(1)
             )
             result = await self.db.execute(query)
             fund = result.scalar_one_or_none()
@@ -817,31 +986,30 @@ class FundService:
         if fund is None:
             raise ValueError(f"Fund not found: {fund_id}")
         
-        # Get AMC name
+        # Get AMC name - relationship is eagerly loaded, so this is fast
         amc_name = "Unknown"
         if fund.amc:
             amc_name = fund.amc.name_en
         else:
-            # Fallback: query AMC directly
+            # Fallback: query AMC directly (should be rare)
             amc_res = await self.db.execute(select(AMC).where(AMC.unique_id == fund.amc_id))
             amc_obj = amc_res.scalar_one_or_none()
             if amc_obj:
                 amc_name = amc_obj.name_en
         
-        # Get actual expense ratio from fee breakdown (matching what fund detail page shows)
+        # Use class_abbr_name as fund_id if it exists, otherwise use proj_id
+        display_fund_id = fund.class_abbr_name if fund.class_abbr_name and fund.class_abbr_name != "" else fund.proj_id
+        
+        # Get actual expense ratio from cached fee data (matching what fund detail page shows)
         # Note: expense_ratio field is not displayed in UI, but we calculate it here for API response
+        # Optimize: Use stored expense_ratio directly - skip calculation to improve performance
+        # The expense_ratio is already calculated and stored during ingestion
         expense_ratio = None
-        try:
-            # Try to get actual expense ratio from fee breakdown
-            fee_breakdown = await self.get_fee_breakdown(display_fund_id)
-            if fee_breakdown.get("total_expense_ratio_actual") is not None:
-                expense_ratio = round(float(fee_breakdown["total_expense_ratio_actual"]), 3)
-            elif fee_breakdown.get("total_expense_ratio") is not None:
-                expense_ratio = round(float(fee_breakdown["total_expense_ratio"]), 3)
-        except Exception:
-            # Fallback to stored expense_ratio if fee breakdown unavailable
-            if fund.expense_ratio is not None:
-                expense_ratio = round(float(fund.expense_ratio), 3)
+        if fund.expense_ratio is not None:
+            # Use stored expense_ratio as primary source (fastest - no calculation needed)
+            expense_ratio = round(float(fund.expense_ratio), 3)
+        # Skip expensive fee_data_raw calculation - if expense_ratio is not stored,
+        # it means the calculation failed during ingestion, so don't retry here
         
         # Format dates
         as_of_date = None
@@ -861,72 +1029,120 @@ class FundService:
         # Use risk_level_int if available, fallback to risk_level string
         risk_level_display = str(fund.risk_level_int) if fund.risk_level_int is not None else fund.risk_level
         
-        # Use class_abbr_name as fund_id if it exists, otherwise use proj_id
-        display_fund_id = fund.class_abbr_name if fund.class_abbr_name and fund.class_abbr_name != "" else fund.proj_id
-        
         # AIMC Classification (with remark if from SEC_API)
         aimc_category = fund.aimc_category
         aimc_category_source = fund.aimc_category_source
         
-        # Investment constraints - fetch from SEC API if available
+        # Investment constraints - read from database (stored during ingestion)
+        # This eliminates live API calls and significantly improves page load performance
+        # Fallback to live API calls only if data is not available in database
         min_investment = None
         min_redemption = None
         min_balance = None
         redemption_period = None
         
-        # Try to get investment data from SEC API
-        try:
-            investment_data = await self._get_investment_constraints(fund.proj_id)
-            if investment_data:
-                # Format minimum investment (SEC API returns code for currency, default to THB)
-                if investment_data.get('minimum_sub'):
-                    amount = investment_data['minimum_sub']
-                    min_investment = f"{self._format_currency_amount(amount)} THB"
-                # Format minimum redemption
-                if investment_data.get('minimum_redempt'):
-                    amount = investment_data['minimum_redempt']
-                    min_redemption = f"{self._format_currency_amount(amount)} THB"
-                # Format minimum balance (value or units)
-                if investment_data.get('lowbal_val') is not None and investment_data.get('lowbal_val') > 0:
-                    amount = investment_data['lowbal_val']
-                    min_balance = f"{self._format_currency_amount(amount)} THB"
-                elif investment_data.get('lowbal_unit') is not None and investment_data.get('lowbal_unit') > 0:
-                    units = investment_data['lowbal_unit']
-                    min_balance = f"{self._format_currency_amount(units)} units"
-        except Exception:
-            pass
+        # Process investment constraints data from database
+        investment_data = None
+        if fund.investment_data_raw:
+            # Data is stored as a list (one per class), get the first item or match by class
+            investment_list = fund.investment_data_raw if isinstance(fund.investment_data_raw, list) else [fund.investment_data_raw]
+            if investment_list:
+                # Try to find matching class, otherwise use first item
+                if fund.class_abbr_name:
+                    investment_data = next(
+                        (item for item in investment_list if item.get('class_abbr_name') == fund.class_abbr_name),
+                        investment_list[0] if investment_list else None
+                    )
+                else:
+                    investment_data = investment_list[0]
         
-        # Try to get redemption period data
-        try:
-            redemption_data = await self._get_redemption_data(fund.proj_id)
-            if redemption_data:
-                redemption_period = self._format_redemption_period(redemption_data)
-        except Exception:
-            pass
+        # If not in database, try live API call as fallback
+        if not investment_data:
+            try:
+                investment_data = await self._get_investment_constraints(fund.proj_id)
+            except Exception:
+                pass
         
-        # Fetch dividend policy data (2.5)
+        if investment_data:
+            # Format minimum investment (SEC API returns code for currency, default to THB)
+            if investment_data.get('minimum_sub'):
+                amount = investment_data['minimum_sub']
+                min_investment = f"{self._format_currency_amount(amount)} THB"
+            # Format minimum redemption
+            if investment_data.get('minimum_redempt'):
+                amount = investment_data['minimum_redempt']
+                min_redemption = f"{self._format_currency_amount(amount)} THB"
+            # Format minimum balance (value or units)
+            if investment_data.get('lowbal_val') is not None and investment_data.get('lowbal_val') > 0:
+                amount = investment_data['lowbal_val']
+                min_balance = f"{self._format_currency_amount(amount)} THB"
+            elif investment_data.get('lowbal_unit') is not None and investment_data.get('lowbal_unit') > 0:
+                units = investment_data['lowbal_unit']
+                min_balance = f"{self._format_currency_amount(units)} units"
+        
+        # Process redemption period data from database
+        redemption_data = fund.redemption_data_raw
+        
+        # If not in database, try live API call as fallback
+        if not redemption_data:
+            try:
+                redemption_data = await self._get_redemption_data(fund.proj_id)
+            except Exception:
+                pass
+        
+        if redemption_data:
+            redemption_period = self._format_redemption_period(redemption_data)
+        
+        # Process dividend policy data from database (2.5)
         dividend_policy = None
         dividend_policy_remark = None
-        try:
-            dividend_data = await self._get_dividend_data(fund.proj_id, fund.class_abbr_name)
-            if dividend_data:
-                dividend_policy = dividend_data.get('dividend_policy')
-                dividend_policy_remark = dividend_data.get('dividend_policy_remark')
-        except Exception:
-            pass
+        dividend_data = None
         
-        # Fetch fund policy data (2.3)
+        if fund.dividend_data_raw:
+            # Data is stored as a list (one per class)
+            dividend_list = fund.dividend_data_raw if isinstance(fund.dividend_data_raw, list) else [fund.dividend_data_raw]
+            if dividend_list:
+                # Try to find matching class, otherwise use first item
+                if fund.class_abbr_name:
+                    dividend_data = next(
+                        (item for item in dividend_list if item.get('class_abbr_name') == fund.class_abbr_name),
+                        dividend_list[0] if dividend_list else None
+                    )
+                else:
+                    dividend_data = dividend_list[0]
+        
+        # If not in database, try live API call as fallback
+        if not dividend_data:
+            try:
+                dividend_data = await self._get_dividend_data(fund.proj_id, fund.class_abbr_name)
+            except Exception:
+                pass
+        
+        if dividend_data:
+            dividend_policy = dividend_data.get('dividend_policy')
+            dividend_policy_remark = dividend_data.get('dividend_policy_remark')
+        
+        # Process fund policy data from database (2.3)
         fund_policy_type = None
         management_style = None
         management_style_desc = None
-        try:
-            policy_data = await self._get_policy_data(fund.proj_id)
-            if policy_data:
-                fund_policy_type = policy_data.get('policy_desc')
-                management_style = policy_data.get('management_style')
-                management_style_desc = self._format_management_style(management_style)
-        except Exception:
-            pass
+        policy_data = fund.policy_data_raw
+        
+        # If not in database, try live API call as fallback
+        if not policy_data:
+            try:
+                policy_data = await self._get_policy_data(fund.proj_id)
+            except Exception:
+                pass
+        
+        if policy_data:
+            fund_policy_type = policy_data.get('policy_desc')
+            management_style = policy_data.get('management_style')
+            management_style_desc = self._format_management_style(management_style)
+        
+        elapsed = time.time() - start_time
+        if elapsed > 0.1:  # Log if takes more than 100ms
+            logger.info(f"get_fund_by_id({fund_id}) took {elapsed:.3f}s")
         
         return FundDetail(
             fund_id=display_fund_id,
@@ -1175,31 +1391,79 @@ class FundService:
         proj_id = fund.proj_id
         current_class = fund.class_abbr_name or ""
         
-        # Fetch share classes from SEC API
-        client = SECAPIClient()
-        classes_data, error = client.fetch_class_fund(proj_id)
-        
-        # Also fetch dividend data to show dividend policy per class
-        dividend_data_list, _ = client.fetch_dividend(proj_id)
+        # Build dividend map from cached database data first (stored during ingestion)
+        # This eliminates live API calls and significantly improves page load performance
+        # Fallback to live API calls only if data is not available in database
         dividend_map = {}
-        if dividend_data_list:
+        dividend_data_list = None
+        
+        # Try to get dividend data from database (check all funds with same proj_id)
+        if fund.dividend_data_raw:
+            dividend_data_list = fund.dividend_data_raw if isinstance(fund.dividend_data_raw, list) else [fund.dividend_data_raw]
             for div in dividend_data_list:
                 class_name = div.get('class_abbr_name', '')
                 dividend_map[class_name] = div.get('dividend_policy')
         
+        # If not in database, try live API call as fallback
+        if not dividend_data_list:
+            try:
+                client = SECAPIClient()
+                dividend_data_list, _ = client.fetch_dividend(proj_id)
+                if dividend_data_list:
+                    for div in dividend_data_list:
+                        class_name = div.get('class_abbr_name', '')
+                        dividend_map[class_name] = div.get('dividend_policy')
+            except Exception:
+                pass
+        
+        # Try to get share classes from database first (all funds with same proj_id)
+        # This eliminates live API calls and significantly improves page load performance
         classes = []
-        if classes_data and not error:
-            for cls in classes_data:
-                class_abbr = cls.get('class_abbr_name', '')
+        classes_from_db = False
+        
+        query = select(Fund).where(
+            and_(
+                Fund.proj_id == proj_id,
+                Fund.fund_status == "RG"  # Only active funds
+            )
+        ).order_by(Fund.class_abbr_name)
+        
+        result = await self.db.execute(query)
+        db_funds = list(result.scalars().all())
+        
+        if len(db_funds) > 1 or (len(db_funds) == 1 and db_funds[0].class_abbr_name):
+            # We have share classes in database
+            classes_from_db = True
+            for db_fund in db_funds:
+                class_abbr = db_fund.class_abbr_name or ""
                 classes.append(ShareClassInfo(
-                    class_abbr_name=class_abbr,
-                    class_name=cls.get('class_name'),
-                    class_description=cls.get('class_additional_desc'),
+                    class_abbr_name=class_abbr or fund_id,
+                    class_name=None,  # Not stored in DB, would need API for this
+                    class_description=None,  # Not stored in DB, would need API for this
                     is_current=(class_abbr == current_class),
                     dividend_policy=dividend_map.get(class_abbr),
                 ))
         
-        # If no classes from API, create single entry for current fund
+        # If not found in database or need additional metadata, fallback to SEC API
+        if not classes_from_db:
+            try:
+                client = SECAPIClient()
+                classes_data, error = client.fetch_class_fund(proj_id)
+                
+                if classes_data and not error:
+                    for cls in classes_data:
+                        class_abbr = cls.get('class_abbr_name', '')
+                        classes.append(ShareClassInfo(
+                            class_abbr_name=class_abbr,
+                            class_name=cls.get('class_name'),
+                            class_description=cls.get('class_additional_desc'),
+                            is_current=(class_abbr == current_class),
+                            dividend_policy=dividend_map.get(class_abbr),
+                        ))
+            except Exception:
+                pass
+        
+        # If still no classes, create single entry for current fund
         if not classes:
             classes.append(ShareClassInfo(
                 class_abbr_name=current_class or fund_id,
@@ -1238,11 +1502,25 @@ class FundService:
         proj_id = fund.proj_id
         class_abbr_name = fund.class_abbr_name or ""
         
-        # Fetch fees from SEC API
-        client = SECAPIClient()
-        fees_data, error = client.fetch_fees(proj_id)
+        # Process fee data from database first (stored during ingestion)
+        # This eliminates live API calls and significantly improves page load performance
+        # Fallback to live API calls only if data is not available in database
+        fees_data = None
+        error = None
         
-        logger.info(f"Fee breakdown for {fund_id}: proj_id={proj_id}, class={class_abbr_name}, fees_count={len(fees_data) if fees_data else 0}, error={error}")
+        if fund.fee_data_raw:
+            # Data is stored as a list (one per class), use it directly
+            fees_data = fund.fee_data_raw if isinstance(fund.fee_data_raw, list) else [fund.fee_data_raw]
+            logger.info(f"Fee breakdown for {fund_id}: Using cached fee_data_raw from database, fees_count={len(fees_data) if fees_data else 0}")
+        else:
+            # If not in database, try live API call as fallback
+            try:
+                client = SECAPIClient()
+                fees_data, error = client.fetch_fees(proj_id)
+                logger.info(f"Fee breakdown for {fund_id}: Fetched from SEC API, fees_count={len(fees_data) if fees_data else 0}, error={error}")
+            except Exception as e:
+                logger.warning(f"Failed to fetch fees from SEC API for {fund_id}: {e}")
+                error = str(e)
         
         if not fees_data or error:
             return {
@@ -1387,6 +1665,21 @@ class FundService:
             "last_upd_date": last_upd_date,
         }
     
+    async def _get_latest_return_as_of_date(self) -> date | None:
+        """
+        Get the latest as-of date from return snapshots.
+        
+        Returns:
+            Latest as-of date as date object, or None if no snapshots exist
+        """
+        result = await self.db.execute(
+            select(FundReturnSnapshot.as_of_date)
+            .order_by(desc(FundReturnSnapshot.as_of_date))
+            .limit(1)
+        )
+        row = result.first()
+        return row[0] if row else None
+    
     async def _fetch_return_snapshots(
         self, 
         funds: list[Fund]
@@ -1406,6 +1699,7 @@ class FundService:
             return {}
         
         # Build list of (proj_id, class_abbr_name) tuples
+        # Normalize: empty string and "main" are equivalent for return snapshots
         fund_keys = [
             (fund.proj_id, fund.class_abbr_name if fund.class_abbr_name else "")
             for fund in funds
@@ -1415,14 +1709,28 @@ class FundService:
         return_data = {key: {"trailing_1y_return": None, "ytd_return": None} for key in fund_keys}
         
         # Build conditions for all fund/class combinations
+        # If class_abbr_name is empty, also try "main" and "Main" (common in return snapshots)
         conditions = []
         for proj_id, class_abbr_name in fund_keys:
-            conditions.append(
-                and_(
-                    FundReturnSnapshot.proj_id == proj_id,
-                    FundReturnSnapshot.class_abbr_name == class_abbr_name
+            if not class_abbr_name:
+                # Empty class: try "", "main", and "Main"
+                conditions.append(
+                    and_(
+                        FundReturnSnapshot.proj_id == proj_id,
+                        or_(
+                            FundReturnSnapshot.class_abbr_name == "",
+                            FundReturnSnapshot.class_abbr_name == "main",
+                            FundReturnSnapshot.class_abbr_name == "Main"
+                        )
+                    )
                 )
-            )
+            else:
+                conditions.append(
+                    and_(
+                        FundReturnSnapshot.proj_id == proj_id,
+                        FundReturnSnapshot.class_abbr_name == class_abbr_name
+                    )
+                )
         
         if not conditions:
             return return_data
@@ -1463,8 +1771,11 @@ class FundService:
         rows = result.all()
         
         # Map results to return_data
+        # Normalize "main" and "Main" back to "" for matching with fund_keys
         for row in rows:
-            key = (row.proj_id, row.class_abbr_name)
+            # Normalize class_abbr_name: "main" or "Main" -> "" to match fund_keys
+            normalized_class = "" if row.class_abbr_name in ("main", "Main") else row.class_abbr_name
+            key = (row.proj_id, normalized_class)
             if key in return_data:
                 return_data[key] = {
                     "trailing_1y_return": float(row.trailing_1y_return) if row.trailing_1y_return is not None else None,
