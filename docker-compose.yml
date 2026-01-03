@@ -60,4 +60,6 @@ services:
 
 volumes:
   postgres_data:
+    external: true
+    name: hunnymhooproject_postgres_data
   es_data:

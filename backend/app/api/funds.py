@@ -12,6 +12,8 @@ from app.models.fund import (
     AMCListResponse,
     MetaResponse,
     CompareFundsResponse,
+    ShareClassListResponse,
+    FeeBreakdownResponse,
 )
 from app.services.fund_service import FundService
 from app.services.compare_service import CompareService
@@ -32,6 +34,9 @@ async def list_funds(
     db: AsyncSession = Depends(get_db),
 ) -> FundListResponse:
     """List mutual funds with optional filters and sorting."""
+    # #region agent log
+    import json; log_data = {"location": "funds.py:36", "message": "list_funds entry", "data": {"limit": limit, "sort": sort, "has_db": db is not None}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "A"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+    # #endregion
     service = FundService(db)
     
     filters = {
@@ -42,14 +47,24 @@ async def list_funds(
     }
     
     try:
-        return await service.list_funds(
+        # #region agent log
+        log_data = {"location": "funds.py:47", "message": "Before service.list_funds call", "data": {"filters": filters}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
+        result = await service.list_funds(
             limit=limit,
             cursor=cursor,
             sort=sort,
             q=q,
             filters=filters
         )
+        # #region agent log
+        log_data = {"location": "funds.py:54", "message": "After service.list_funds call", "data": {"result_items_count": len(result.items) if hasattr(result, "items") else 0}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
+        return result
     except Exception as e:
+        # #region agent log
+        log_data = {"location": "funds.py:55", "message": "Exception in list_funds", "data": {"error_type": type(e).__name__, "error_msg": str(e)}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -72,11 +87,23 @@ async def get_meta(
     
     Returns cached metadata with 5-minute TTL to ensure fast response times.
     """
+    # #region agent log
+    import json; log_data = {"location": "funds.py:68", "message": "get_meta entry", "data": {"has_db": db is not None}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+    # #endregion
     try:
         service = FundService(db)
+        # #region agent log
+        log_data = {"location": "funds.py:79", "message": "Before service.get_meta_stats call", "data": {}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         stats = await service.get_meta_stats()
+        # #region agent log
+        log_data = {"location": "funds.py:80", "message": "After service.get_meta_stats call", "data": {"stats_keys": list(stats.keys()) if isinstance(stats, dict) else "not_dict"}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         return MetaResponse(**stats)
     except Exception as e:
+        # #region agent log
+        log_data = {"location": "funds.py:82", "message": "Exception in get_meta", "data": {"error_type": type(e).__name__, "error_msg": str(e)}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         raise HTTPException(status_code=500, detail=f"Failed to fetch metadata: {str(e)}")
 
 
@@ -221,6 +248,99 @@ async def compare_funds(
         raise HTTPException(
             status_code=500,
             detail="An unexpected error occurred while comparing funds"
+        )
+
+
+@router.get("/{fund_id}/share-classes", response_model=ShareClassListResponse)
+async def get_share_classes(
+    fund_id: str = Path(..., description="Fund identifier (class_abbr_name or proj_id)"),
+    db: AsyncSession = Depends(get_db),
+) -> ShareClassListResponse:
+    """
+    Get all share classes for a fund.
+    
+    Returns list of share classes with descriptions and dividend policies.
+    Used for share class navigation on fund detail page (2.1).
+    
+    Args:
+        fund_id: Fund identifier (class_abbr_name or proj_id)
+        
+    Returns:
+        ShareClassListResponse with all share classes for this fund
+        
+    Raises:
+        404: Fund not found
+        500: Server error
+    """
+    service = FundService(db)
+    
+    try:
+        result = await service.get_share_classes(fund_id.strip())
+        return ShareClassListResponse(**result)
+        
+    except ValueError as e:
+        error_msg = str(e)
+        if "not found" in error_msg.lower():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Fund not found: {fund_id}"
+            )
+        else:
+            raise HTTPException(status_code=400, detail=error_msg)
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Unexpected error fetching share classes for {fund_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred while fetching share classes"
+        )
+
+
+@router.get("/{fund_id}/fees", response_model=FeeBreakdownResponse)
+async def get_fee_breakdown(
+    fund_id: str = Path(..., description="Fund identifier (class_abbr_name or proj_id)"),
+    db: AsyncSession = Depends(get_db),
+) -> FeeBreakdownResponse:
+    """
+    Get detailed fee breakdown for a fund.
+    
+    Returns fees organized by section (transaction fees, recurring fees)
+    with both prospectus rates and actual charged values.
+    Used for fee breakdown display on fund detail page (2.2).
+    
+    Args:
+        fund_id: Fund identifier (class_abbr_name or proj_id)
+        
+    Returns:
+        FeeBreakdownResponse with categorized fee information
+        
+    Raises:
+        404: Fund not found
+        500: Server error
+    """
+    service = FundService(db)
+    
+    try:
+        result = await service.get_fee_breakdown(fund_id.strip())
+        return FeeBreakdownResponse(**result)
+        
+    except ValueError as e:
+        error_msg = str(e)
+        if "not found" in error_msg.lower():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Fund not found: {fund_id}"
+            )
+        else:
+            raise HTTPException(status_code=400, detail=error_msg)
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Unexpected error fetching fees for {fund_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred while fetching fee breakdown"
         )
 
 

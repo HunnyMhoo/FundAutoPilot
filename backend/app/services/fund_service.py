@@ -65,6 +65,9 @@ class FundService:
         Returns:
             FundListResponse with items, next_cursor, and metadata
         """
+        # #region agent log
+        import json; log_data = {"location": "fund_service.py:45", "message": "list_funds entry", "data": {"limit": limit, "sort": sort, "has_search_backend": self.search_backend is not None}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         # Clamp limit
         limit = min(max(1, limit), 100)
         filters = filters or {}
@@ -74,6 +77,9 @@ class FundService:
             return await self._list_funds_elasticsearch(limit, cursor, sort, q, filters)
         else:
             # Fallback to SQL (original implementation)
+            # #region agent log
+            log_data = {"location": "fund_service.py:77", "message": "Before _list_funds_sql call", "data": {}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+            # #endregion
             return await self._list_funds_sql(limit, cursor, sort, q, filters)
     
     async def _list_funds_elasticsearch(
@@ -277,6 +283,9 @@ class FundService:
         filters: dict,
     ) -> FundListResponse:
         """List funds using SQL backend (fallback)."""
+        # #region agent log
+        import json; log_data = {"location": "fund_service.py:271", "message": "_list_funds_sql entry", "data": {"limit": limit, "sort": sort}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         # Base query with eager loading
         query = (
             select(Fund)
@@ -410,15 +419,27 @@ class FundService:
 
         # Execute & Fetch
         query = query.limit(limit + 1)
+        # #region agent log
+        log_data = {"location": "fund_service.py:412", "message": "Before db.execute query", "data": {}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         result = await self.db.execute(query)
         funds = result.scalars().all()
+        # #region agent log
+        log_data = {"location": "fund_service.py:414", "message": "After db.execute query", "data": {"funds_count": len(funds)}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         
         has_more = len(funds) > limit
         if has_more:
             funds = funds[:limit]
 
         # Fetch return snapshots for all funds (US-N10, US-N13)
+        # #region agent log
+        log_data = {"location": "fund_service.py:421", "message": "Before _fetch_return_snapshots call", "data": {"funds_count": len(funds)}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         return_data = await self._fetch_return_snapshots(funds)
+        # #region agent log
+        log_data = {"location": "fund_service.py:422", "message": "After _fetch_return_snapshots call", "data": {"return_data_keys_count": len(return_data)}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         
         # Compute peer ranks for funds (US-N13)
         peer_ranks = {}
@@ -568,10 +589,20 @@ class FundService:
 
     async def get_fund_count(self) -> int:
         """Get total count of active funds."""
+        # #region agent log
+        import json; log_data = {"location": "fund_service.py:569", "message": "get_fund_count entry", "data": {}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
+        # #region agent log
+        log_data = {"location": "fund_service.py:571", "message": "Before db.execute count query", "data": {}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         result = await self.db.execute(
             select(func.count(Fund.proj_id)).where(Fund.fund_status == "RG")
         )
-        return result.scalar() or 0
+        count = result.scalar() or 0
+        # #region agent log
+        log_data = {"location": "fund_service.py:574", "message": "After db.execute count query", "data": {"count": count}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
+        return count
     
     async def get_meta_stats(self) -> Dict[str, Any]:
         """
@@ -586,6 +617,9 @@ class FundService:
                 "data_source": str | None
             }
         """
+        # #region agent log
+        import json; log_data = {"location": "fund_service.py:576", "message": "get_meta_stats entry", "data": {}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         # Check cache
         cache_key = "meta_stats"
         current_time = time.time()
@@ -593,13 +627,25 @@ class FundService:
         if cache_key in _meta_cache:
             cached_data, cached_time = _meta_cache[cache_key]
             if current_time - cached_time < CACHE_TTL:
+                # #region agent log
+                log_data = {"location": "fund_service.py:596", "message": "Returning cached meta stats", "data": {}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+                # #endregion
                 return cached_data
         
         # Cache miss or expired - fetch from database
         # Get fund count
+        # #region agent log
+        log_data = {"location": "fund_service.py:600", "message": "Before get_fund_count call", "data": {}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         fund_count = await self.get_fund_count()
+        # #region agent log
+        log_data = {"location": "fund_service.py:601", "message": "After get_fund_count call", "data": {"fund_count": fund_count}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         
         # Get freshness (same logic as list_funds)
+        # #region agent log
+        log_data = {"location": "fund_service.py:603", "message": "Before snapshot query", "data": {}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         snapshot_result = await self.db.execute(
             select(Fund.data_snapshot_id, Fund.last_upd_date, Fund.data_source)
             .where(Fund.data_snapshot_id.isnot(None))
@@ -607,6 +653,9 @@ class FundService:
             .limit(1)
         )
         snapshot_row = snapshot_result.first()
+        # #region agent log
+        log_data = {"location": "fund_service.py:609", "message": "After snapshot query", "data": {"has_snapshot_row": snapshot_row is not None}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         
         # Format freshness date
         if snapshot_row and snapshot_row[1]:
@@ -625,6 +674,9 @@ class FundService:
         
         # Update cache
         _meta_cache[cache_key] = (result, current_time)
+        # #region agent log
+        log_data = {"location": "fund_service.py:629", "message": "Returning meta stats result", "data": {"result_keys": list(result.keys())}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         
         return result
 
@@ -1695,6 +1747,9 @@ class FundService:
         Returns:
             Dict mapping (proj_id, class_abbr_name) to dict with trailing_1y_return and ytd_return
         """
+        # #region agent log
+        import json; log_data = {"location": "fund_service.py:1683", "message": "_fetch_return_snapshots entry", "data": {"funds_count": len(funds) if funds else 0}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         if not funds:
             return {}
         
@@ -1767,8 +1822,14 @@ class FundService:
             .where(ranked_snapshots.c.rn == 1)
         )
         
+        # #region agent log
+        log_data = {"location": "fund_service.py:1825", "message": "Before db.execute return snapshots query", "data": {"conditions_count": len(conditions)}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         result = await self.db.execute(latest_snapshots_query)
         rows = result.all()
+        # #region agent log
+        log_data = {"location": "fund_service.py:1827", "message": "After db.execute return snapshots query", "data": {"rows_count": len(rows)}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         
         # Map results to return_data
         # Normalize "main" and "Main" back to "" for matching with fund_keys
