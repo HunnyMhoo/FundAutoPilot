@@ -35,6 +35,10 @@ export function FundCatalog({ initialAsOfDate }: FundCatalogProps) {
         reload
     } = useFundCatalog(initialAsOfDate);
 
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'FundCatalog.tsx:render',message:'FundCatalog render',data:{state,fundsLength:funds.length,hasError:!!error,errorMessage:error,searchQuery},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix2',hypothesisId:'C,E'})}).catch(()=>{});
+    // #endregion
+
     // Initial Loading State
     if (state === 'loading_initial') {
         return (

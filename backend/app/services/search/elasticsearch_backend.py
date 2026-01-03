@@ -63,7 +63,8 @@ class ElasticsearchSearchBackend(SearchBackend):
                         "amc_id": {"type": "keyword"},
                         "amc_name": {"type": "text"},
                         "category": {"type": "keyword"},
-                        "risk_level": {"type": "keyword"},
+                        "risk_level": {"type": "keyword"},  # Legacy string field
+                        "risk_level_int": {"type": "integer"},  # Integer risk level (1-8) for sorting
                         "expense_ratio": {"type": "float"},
                         "fund_status": {"type": "keyword"},
                         "fee_band": {"type": "keyword"},  # Derived: low, medium, high
@@ -103,6 +104,14 @@ class ElasticsearchSearchBackend(SearchBackend):
         """
         # Build query
         es_query = self._build_query(query, filters)
+        # #region agent log
+        import json; log_data = {"location": "elasticsearch_backend.py:search", "message": "Built Elasticsearch query", "data": {"query": query, "has_query": bool(query), "es_query": es_query}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "no-data-issue", "hypothesisId": "no-data"}; 
+        try:
+            with open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a") as f:
+                f.write(json.dumps(log_data) + "\n")
+        except Exception:
+            pass
+        # #endregion
         
         # Build sort
         es_sort = self._build_sort(sort)
@@ -348,8 +357,8 @@ class ElasticsearchSearchBackend(SearchBackend):
             "name_desc": [{"fund_name.keyword": {"order": "desc"}}, "_score"],
             "fee_asc": [{"expense_ratio": {"order": "asc", "missing": "_last"}}, "_score"],
             "fee_desc": [{"expense_ratio": {"order": "desc", "missing": "_last"}}, "_score"],
-            "risk_asc": [{"risk_level": {"order": "asc", "missing": "_last"}}, "_score"],
-            "risk_desc": [{"risk_level": {"order": "desc", "missing": "_last"}}, "_score"],
+            "risk_asc": [{"risk_level_int": {"order": "asc", "missing": "_last"}}, {"risk_level": {"order": "asc", "missing": "_last"}}, "_score"],
+            "risk_desc": [{"risk_level_int": {"order": "desc", "missing": "_last"}}, {"risk_level": {"order": "desc", "missing": "_last"}}, "_score"],
         }
         
         return sort_mapping.get(sort, sort_mapping["name_asc"])

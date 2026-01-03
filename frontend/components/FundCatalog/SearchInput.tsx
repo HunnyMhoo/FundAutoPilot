@@ -16,9 +16,22 @@ export default function SearchInput({
     const [value, setValue] = useState(initialValue);
     const debounceTimer = useRef<NodeJS.Timeout | null>(null);
 
+    // Sync internal state with prop when it changes from parent (e.g., after search completes)
+    useEffect(() => {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SearchInput.tsx:useEffect-initialValue',message:'initialValue prop changed',data:{initialValue,currentValue:value,valuesMatch:initialValue===value},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+        if (initialValue !== value) {
+            setValue(initialValue);
+        }
+    }, [initialValue]); // Only depend on initialValue, not value, to avoid loops
+
     // Handle input change
     const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const newValue = e.target.value;
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SearchInput.tsx:handleChange',message:'Input changed',data:{newValue,oldValue:value,hasDebounceTimer:!!debounceTimer.current},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,C'})}).catch(()=>{});
+        // #endregion
         setValue(newValue);
 
         // Debounce search
@@ -27,6 +40,9 @@ export default function SearchInput({
         }
 
         debounceTimer.current = setTimeout(() => {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SearchInput.tsx:debounced-onSearch',message:'Calling onSearch after debounce',data:{newValue},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+            // #endregion
             onSearch(newValue);
         }, 300);
     };

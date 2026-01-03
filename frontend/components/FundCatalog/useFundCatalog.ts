@@ -23,40 +23,87 @@ export function useFundCatalog(initialAsOfDate?: string) {
     // De-duplication
     const seenIds = useRef(new Set<string>());
     const isLoadingRef = useRef(false);
+    const hasLoadedFundsRef = useRef(false);
 
     // Initial Load / Refetch from scratch (Page 1)
     const loadInitial = useCallback(async (
         q: string = searchQuery,
         currentFilters: FundFilters = filters,
-        currentSort: SortOption = sort
+        currentSort: SortOption = sort,
+        isInitialLoad: boolean = false
     ) => {
-        if (isLoadingRef.current) return;
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useFundCatalog.ts:33',message:'loadInitial called',data:{isLoading:isLoadingRef.current,q,currentFilters,currentSort,isInitialLoad},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
+        if (isLoadingRef.current) {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useFundCatalog.ts:35',message:'loadInitial blocked - already loading',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'D'})}).catch(()=>{});
+            // #endregion
+            return;
+        }
 
         isLoadingRef.current = true;
-        setState('loading_initial');
+        // Only set loading_initial on the very first load, not on search/filter updates
+        // This prevents glitching by keeping current results visible during search
+        const shouldShowLoading = isInitialLoad || !hasLoadedFundsRef.current;
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useFundCatalog.ts:loadInitial-start',message:'loadInitial starting',data:{q,isInitialLoad,hasLoadedFunds:hasLoadedFundsRef.current,shouldShowLoading,currentState:state},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix2',hypothesisId:'B,E'})}).catch(()=>{});
+        // #endregion
+        if (shouldShowLoading) {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useFundCatalog.ts:setState-loading',message:'Setting state to loading_initial (initial load)',data:{q,isInitialLoad,hasLoadedFunds:hasLoadedFundsRef.current},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix2',hypothesisId:'B,E'})}).catch(()=>{});
+            // #endregion
+            setState('loading_initial');
+        } else {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useFundCatalog.ts:setState-skip',message:'Skipping loading_initial (search update) - keeping current state',data:{q,hasLoadedFunds:hasLoadedFundsRef.current,currentState:state},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix2',hypothesisId:'B,E'})}).catch(()=>{});
+            // #endregion
+            // Keep current state visible during search updates to prevent glitching
+            // Don't change state here - let it stay as 'loaded' or whatever it was
+        }
         setError(null);
         seenIds.current.clear(); // Reset dupe check on fresh load
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useFundCatalog.ts:38',message:'Before fetchFunds call',data:{q,currentFilters,currentSort},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
 
         try {
             // No cursor = Page 1
             const response = await fetchFunds(undefined, 25, q, currentFilters, currentSort);
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useFundCatalog.ts:43',message:'fetchFunds response received',data:{itemsCount:response?.items?.length||0,hasItems:!!response?.items,hasNextCursor:!!response?.next_cursor,responseKeys:response?Object.keys(response):[],asOfDate:response?.as_of_date},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C,E'})}).catch(()=>{});
+            // #endregion
 
             const uniqueFunds = response.items.filter(fund => {
                 if (seenIds.current.has(fund.fund_id)) return false;
                 seenIds.current.add(fund.fund_id);
                 return true;
             });
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useFundCatalog.ts:50',message:'After filtering unique funds',data:{uniqueCount:uniqueFunds.length,originalCount:response.items.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+            // #endregion
 
             setFunds(uniqueFunds);
             setNextCursor(response.next_cursor);
             setAsOfDate(response.as_of_date);
-            setState(uniqueFunds.length === 0 ? 'idle' :
-                response.next_cursor ? 'loaded' : 'end_of_results');
+            hasLoadedFundsRef.current = true; // Mark that we've successfully loaded funds
+            const newState = uniqueFunds.length === 0 ? 'idle' :
+                response.next_cursor ? 'loaded' : 'end_of_results';
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useFundCatalog.ts:54',message:'Setting state after success',data:{newState,uniqueFundsLength:uniqueFunds.length,hasNextCursor:!!response.next_cursor},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'C'})}).catch(()=>{});
+            // #endregion
+            setState(newState);
         } catch (err) {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useFundCatalog.ts:57',message:'Error in loadInitial',data:{errorMessage:err instanceof Error?err.message:String(err),errorType:err?.constructor?.name},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+            // #endregion
             setError(err instanceof Error ? err.message : 'Failed to load funds');
             setState('error_initial');
         } finally {
             isLoadingRef.current = false;
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useFundCatalog.ts:60',message:'loadInitial finally block',data:{isLoadingAfter:isLoadingRef.current},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+            // #endregion
         }
     }, [searchQuery, filters, sort]);
 
@@ -92,6 +139,9 @@ export function useFundCatalog(initialAsOfDate?: string) {
 
     // 1. Search Debounce is handled by UI component usually, but here we just accept a new query
     const updateSearch = (q: string) => {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useFundCatalog.ts:updateSearch',message:'updateSearch called',data:{newQuery:q,oldQuery:searchQuery,currentState:state},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B,C'})}).catch(()=>{});
+        // #endregion
         setSearchQuery(q);
     };
     
@@ -134,17 +184,26 @@ export function useFundCatalog(initialAsOfDate?: string) {
     const isFirstRun = useRef(true);
 
     useEffect(() => {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useFundCatalog.ts:useEffect',message:'useEffect triggered',data:{isFirstRun:isFirstRun.current,searchQuery,filters,sort,currentState:state,isLoading:isLoadingRef.current},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B,D'})}).catch(()=>{});
+        // #endregion
         // Skip first run? Or rely on UI to trigger? 
         // Usually good to load empty state or default.
         if (isFirstRun.current) {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useFundCatalog.ts:firstRun',message:'First run - calling loadInitial',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'B'})}).catch(()=>{});
+            // #endregion
             isFirstRun.current = false;
-            loadInitial();
+            loadInitial(undefined, undefined, undefined, true);
             return;
         }
 
         // On any constraint change, strictly reload from Page 1
         // We pass the current state explicitly to be safe, though callback closes over it
-        loadInitial(searchQuery, filters, sort);
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f418701-bce6-449b-9ec6-0178fb2b8930',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useFundCatalog.ts:constraintChange',message:'Constraint change - calling loadInitial',data:{searchQuery,filters,sort,currentState:state},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'B,E'})}).catch(()=>{});
+        // #endregion
+        loadInitial(searchQuery, filters, sort, false);
     }, [searchQuery, filters, sort]); // Intentionally exclude loadInitial to avoid loop
 
     return {
@@ -165,6 +224,6 @@ export function useFundCatalog(initialAsOfDate?: string) {
         removeFilter,
         updateSort,
         // Manual Reload
-        reload: () => loadInitial(searchQuery, filters, sort)
+        reload: () => loadInitial(searchQuery, filters, sort, false)
     };
 }

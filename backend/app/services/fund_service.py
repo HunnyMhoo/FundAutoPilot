@@ -1,5 +1,6 @@
 """Fund service for business logic operations."""
 
+import asyncio
 import base64
 import json
 import logging
@@ -66,7 +67,12 @@ class FundService:
             FundListResponse with items, next_cursor, and metadata
         """
         # #region agent log
-        import json; log_data = {"location": "fund_service.py:45", "message": "list_funds entry", "data": {"limit": limit, "sort": sort, "has_search_backend": self.search_backend is not None}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        import json; log_data = {"location": "fund_service.py:list_funds", "message": "list_funds entry", "data": {"limit": limit, "sort": sort, "q": q, "has_search_backend": self.search_backend is not None, "elasticsearch_enabled": settings.elasticsearch_enabled}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "no-data-issue", "hypothesisId": "no-data"}; 
+        try:
+            with open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a") as f:
+                f.write(json.dumps(log_data) + "\n")
+        except Exception:
+            pass
         # #endregion
         # Clamp limit
         limit = min(max(1, limit), 100)
@@ -74,11 +80,14 @@ class FundService:
 
         # Use Elasticsearch if enabled
         if self.search_backend:
+            # #region agent log
+            log_data = {"location": "fund_service.py:list_funds", "message": "Using Elasticsearch backend", "data": {"q": q, "has_query": q is not None and len(q) > 0}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "validate-search", "hypothesisId": "search-backend"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+            # #endregion
             return await self._list_funds_elasticsearch(limit, cursor, sort, q, filters)
         else:
             # Fallback to SQL (original implementation)
             # #region agent log
-            log_data = {"location": "fund_service.py:77", "message": "Before _list_funds_sql call", "data": {}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+            log_data = {"location": "fund_service.py:list_funds", "message": "Using SQL backend (Elasticsearch not available)", "data": {"q": q, "has_query": q is not None and len(q) > 0}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "validate-search", "hypothesisId": "search-backend"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
             # #endregion
             return await self._list_funds_sql(limit, cursor, sort, q, filters)
     
@@ -103,14 +112,24 @@ class FundService:
             except (NotFoundError, KeyError):
                 doc_count = 0
             
+            # #region agent log
+            import json; log_data = {"location": "fund_service.py:_list_funds_elasticsearch", "message": "Elasticsearch index check", "data": {"doc_count": doc_count, "index_name": self.search_backend.index_name, "q": q}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "validate-search", "hypothesisId": "search-backend"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+            # #endregion
+            
             # If index is empty, fall back to SQL (index not yet populated)
             if doc_count == 0:
                 import logging
                 logger = logging.getLogger(__name__)
                 logger.info("Elasticsearch index is empty, falling back to SQL search")
+                # #region agent log
+                log_data = {"location": "fund_service.py:_list_funds_elasticsearch", "message": "Falling back to SQL - index is empty", "data": {"doc_count": doc_count}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "validate-search", "hypothesisId": "search-backend"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+                # #endregion
                 return await self._list_funds_sql(limit, cursor, sort, q, filters)
             
             # Search using Elasticsearch
+            # #region agent log
+            log_data = {"location": "fund_service.py:_list_funds_elasticsearch", "message": "Executing Elasticsearch search", "data": {"q": q, "filters": filters, "sort": sort, "limit": limit}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "no-data-issue", "hypothesisId": "no-data"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+            # #endregion
             search_result = await self.search_backend.search(
                 query=q,
                 filters=filters,
@@ -118,17 +137,26 @@ class FundService:
                 limit=limit,
                 cursor=cursor,
             )
+            # #region agent log
+            log_data = {"location": "fund_service.py:_list_funds_elasticsearch", "message": "Elasticsearch search completed", "data": {"result_count": len(search_result.get("items", [])) if search_result else 0, "has_items": bool(search_result and search_result.get("items")), "search_result_keys": list(search_result.keys()) if search_result else [], "first_item": search_result["items"][0] if search_result and search_result.get("items") else None}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "no-data-issue", "hypothesisId": "no-data"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+            # #endregion
                 
         except Exception as e:
             # If Elasticsearch fails, fall back to SQL
             import logging
             logger = logging.getLogger(__name__)
             logger.warning(f"Elasticsearch search failed, falling back to SQL: {e}")
+            # #region agent log
+            import json; log_data = {"location": "fund_service.py:_list_funds_elasticsearch", "message": "Falling back to SQL - Elasticsearch error", "data": {"error": str(e), "error_type": type(e).__name__}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "validate-search", "hypothesisId": "search-backend"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+            # #endregion
             return await self._list_funds_sql(limit, cursor, sort, q, filters)
         
         # Convert Elasticsearch results to FundSummary
         # First, collect fund_ids to look up Fund records for return data
         fund_ids = [doc["fund_id"] for doc in search_result["items"]]
+        # #region agent log
+        log_data = {"location": "fund_service.py:_list_funds_elasticsearch", "message": "Looking up fund records", "data": {"fund_ids_count": len(fund_ids), "fund_ids_sample": fund_ids[:5]}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "no-data-issue", "hypothesisId": "no-data"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         
         # Look up Fund records to get proj_id and class_abbr_name for return data fetching
         fund_records = []
@@ -146,6 +174,14 @@ class FundService:
             
             if fund:
                 fund_records.append(fund)
+            else:
+                # #region agent log
+                log_data = {"location": "fund_service.py:_list_funds_elasticsearch", "message": "Fund record not found", "data": {"fund_id": fund_id}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "no-data-issue", "hypothesisId": "no-data"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+                # #endregion
+        
+        # #region agent log
+        log_data = {"location": "fund_service.py:_list_funds_elasticsearch", "message": "Fund records lookup complete", "data": {"fund_records_count": len(fund_records), "expected_count": len(fund_ids)}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "no-data-issue", "hypothesisId": "no-data"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         
         # Fetch return snapshots for all funds (US-N10, US-N13)
         return_data = await self._fetch_return_snapshots(fund_records)
@@ -284,7 +320,7 @@ class FundService:
     ) -> FundListResponse:
         """List funds using SQL backend (fallback)."""
         # #region agent log
-        import json; log_data = {"location": "fund_service.py:271", "message": "_list_funds_sql entry", "data": {"limit": limit, "sort": sort}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        import json; log_data = {"location": "fund_service.py:_list_funds_sql", "message": "Using SQL backend for search", "data": {"limit": limit, "sort": sort, "q": q, "has_query": q is not None and len(q) > 0}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "validate-search", "hypothesisId": "search-backend"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
         # #endregion
         # Base query with eager loading
         query = (
@@ -1001,10 +1037,13 @@ class FundService:
         Raises:
             ValueError: If fund_id is invalid or fund not found
         """
-        import time
+        import time, json
         from app.models.fund import FundDetail
         
         start_time = time.time()
+        # #region agent log
+        log_data = {"location": "fund_service.py:get_fund_by_id", "message": "get_fund_by_id entry", "data": {"fund_id": fund_id}, "timestamp": start_time, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         
         # Basic validation: fund_id must be non-empty
         if not fund_id or not fund_id.strip():
@@ -1014,12 +1053,21 @@ class FundService:
         
         # Optimized lookup: Try class_abbr_name first, then proj_id
         # Eagerly load AMC relationship to avoid lazy loading issues in async context
+        # #region agent log
+        db_query_start = time.time(); log_data = {"location": "fund_service.py:get_fund_by_id", "message": "Before first DB query", "data": {"fund_id": fund_id}, "timestamp": db_query_start, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         query = select(Fund).options(selectinload(Fund.amc)).where(Fund.class_abbr_name == fund_id)
         result = await self.db.execute(query)
         fund = result.scalar_one_or_none()
+        # #region agent log
+        db_query_end = time.time(); log_data = {"location": "fund_service.py:get_fund_by_id", "message": "After first DB query", "data": {"fund_id": fund_id, "found": fund is not None, "duration": db_query_end - db_query_start}, "timestamp": db_query_end, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         
         # If not found by class name, try proj_id (backward compatibility)
         if fund is None:
+            # #region agent log
+            db_query2_start = time.time(); log_data = {"location": "fund_service.py:get_fund_by_id", "message": "Before second DB query", "data": {"fund_id": fund_id}, "timestamp": db_query2_start, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+            # #endregion
             # Try fund-level record first (no classes), then any share class
             query = (
                 select(Fund)
@@ -1034,6 +1082,9 @@ class FundService:
             )
             result = await self.db.execute(query)
             fund = result.scalar_one_or_none()
+            # #region agent log
+            db_query2_end = time.time(); log_data = {"location": "fund_service.py:get_fund_by_id", "message": "After second DB query", "data": {"fund_id": fund_id, "found": fund is not None, "duration": db_query2_end - db_query2_start}, "timestamp": db_query2_end, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+            # #endregion
         
         if fund is None:
             raise ValueError(f"Fund not found: {fund_id}")
@@ -1108,42 +1159,8 @@ class FundService:
                 else:
                     investment_data = investment_list[0]
         
-        # If not in database, try live API call as fallback
-        if not investment_data:
-            try:
-                investment_data = await self._get_investment_constraints(fund.proj_id)
-            except Exception:
-                pass
-        
-        if investment_data:
-            # Format minimum investment (SEC API returns code for currency, default to THB)
-            if investment_data.get('minimum_sub'):
-                amount = investment_data['minimum_sub']
-                min_investment = f"{self._format_currency_amount(amount)} THB"
-            # Format minimum redemption
-            if investment_data.get('minimum_redempt'):
-                amount = investment_data['minimum_redempt']
-                min_redemption = f"{self._format_currency_amount(amount)} THB"
-            # Format minimum balance (value or units)
-            if investment_data.get('lowbal_val') is not None and investment_data.get('lowbal_val') > 0:
-                amount = investment_data['lowbal_val']
-                min_balance = f"{self._format_currency_amount(amount)} THB"
-            elif investment_data.get('lowbal_unit') is not None and investment_data.get('lowbal_unit') > 0:
-                units = investment_data['lowbal_unit']
-                min_balance = f"{self._format_currency_amount(units)} units"
-        
         # Process redemption period data from database
         redemption_data = fund.redemption_data_raw
-        
-        # If not in database, try live API call as fallback
-        if not redemption_data:
-            try:
-                redemption_data = await self._get_redemption_data(fund.proj_id)
-            except Exception:
-                pass
-        
-        if redemption_data:
-            redemption_period = self._format_redemption_period(redemption_data)
         
         # Process dividend policy data from database (2.5)
         dividend_policy = None
@@ -1163,29 +1180,87 @@ class FundService:
                 else:
                     dividend_data = dividend_list[0]
         
-        # If not in database, try live API call as fallback
-        if not dividend_data:
-            try:
-                dividend_data = await self._get_dividend_data(fund.proj_id, fund.class_abbr_name)
-            except Exception:
-                pass
-        
-        if dividend_data:
-            dividend_policy = dividend_data.get('dividend_policy')
-            dividend_policy_remark = dividend_data.get('dividend_policy_remark')
-        
         # Process fund policy data from database (2.3)
         fund_policy_type = None
         management_style = None
         management_style_desc = None
         policy_data = fund.policy_data_raw
         
-        # If not in database, try live API call as fallback
+        # Collect all missing data and fetch in parallel
+        # #region agent log
+        parallel_fetch_start = time.time(); log_data = {"location": "fund_service.py:get_fund_by_id", "message": "Before parallel SEC API calls", "data": {"proj_id": fund.proj_id, "needs_investment": not investment_data, "needs_redemption": not redemption_data, "needs_dividend": not dividend_data, "needs_policy": not policy_data}, "timestamp": parallel_fetch_start, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
+        
+        # Create tasks for missing data (run in parallel)
+        tasks = {}
+        if not investment_data:
+            tasks['investment'] = self._get_investment_constraints(fund.proj_id)
+        if not redemption_data:
+            tasks['redemption'] = self._get_redemption_data(fund.proj_id)
+        if not dividend_data:
+            tasks['dividend'] = self._get_dividend_data(fund.proj_id, fund.class_abbr_name)
         if not policy_data:
+            tasks['policy'] = self._get_policy_data(fund.proj_id)
+        
+        # Execute all tasks in parallel
+        if tasks:
             try:
-                policy_data = await self._get_policy_data(fund.proj_id)
-            except Exception:
+                results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+                # Map results back to their keys
+                for i, (key, task) in enumerate(tasks.items()):
+                    result = results[i]
+                    if isinstance(result, Exception):
+                        # #region agent log
+                        log_data = {"location": "fund_service.py:get_fund_by_id", "message": f"SEC API call - {key} error", "data": {"proj_id": fund.proj_id, "error": str(result)}, "timestamp": time.time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+                        # #endregion
+                    else:
+                        if key == 'investment':
+                            investment_data = result
+                        elif key == 'redemption':
+                            redemption_data = result
+                        elif key == 'dividend':
+                            dividend_data = result
+                        elif key == 'policy':
+                            policy_data = result
+                        # #region agent log
+                        log_data = {"location": "fund_service.py:get_fund_by_id", "message": f"SEC API call - {key} completed", "data": {"proj_id": fund.proj_id, "has_data": result is not None}, "timestamp": time.time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+                        # #endregion
+            except Exception as e:
+                # #region agent log
+                log_data = {"location": "fund_service.py:get_fund_by_id", "message": "Parallel SEC API calls error", "data": {"proj_id": fund.proj_id, "error": str(e)}, "timestamp": time.time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+                # #endregion
                 pass
+        
+        # #region agent log
+        parallel_fetch_end = time.time(); log_data = {"location": "fund_service.py:get_fund_by_id", "message": "After parallel SEC API calls", "data": {"proj_id": fund.proj_id, "duration": parallel_fetch_end - parallel_fetch_start, "tasks_count": len(tasks)}, "timestamp": parallel_fetch_end, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
+        
+        # Process investment data
+        if investment_data:
+            # Format minimum investment (SEC API returns code for currency, default to THB)
+            if investment_data.get('minimum_sub'):
+                amount = investment_data['minimum_sub']
+                min_investment = f"{self._format_currency_amount(amount)} THB"
+            # Format minimum redemption
+            if investment_data.get('minimum_redempt'):
+                amount = investment_data['minimum_redempt']
+                min_redemption = f"{self._format_currency_amount(amount)} THB"
+            # Format minimum balance (value or units)
+            if investment_data.get('lowbal_val') is not None and investment_data.get('lowbal_val') > 0:
+                amount = investment_data['lowbal_val']
+                min_balance = f"{self._format_currency_amount(amount)} THB"
+            elif investment_data.get('lowbal_unit') is not None and investment_data.get('lowbal_unit') > 0:
+                units = investment_data['lowbal_unit']
+                min_balance = f"{self._format_currency_amount(units)} units"
+        
+        # Process redemption data
+        if redemption_data:
+            redemption_period = self._format_redemption_period(redemption_data)
+        
+        # Process dividend data
+        if dividend_data:
+            dividend_policy = dividend_data.get('dividend_policy')
+            dividend_policy_remark = dividend_data.get('dividend_policy_remark')
         
         if policy_data:
             fund_policy_type = policy_data.get('policy_desc')
@@ -1195,6 +1270,10 @@ class FundService:
         elapsed = time.time() - start_time
         if elapsed > 0.1:  # Log if takes more than 100ms
             logger.info(f"get_fund_by_id({fund_id}) took {elapsed:.3f}s")
+        
+        # #region agent log
+        exit_time = time.time(); log_data = {"location": "fund_service.py:get_fund_by_id", "message": "get_fund_by_id exit", "data": {"fund_id": fund_id, "total_duration": elapsed}, "timestamp": exit_time, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         
         return FundDetail(
             fund_id=display_fund_id,

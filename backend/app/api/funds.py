@@ -35,7 +35,12 @@ async def list_funds(
 ) -> FundListResponse:
     """List mutual funds with optional filters and sorting."""
     # #region agent log
-    import json; log_data = {"location": "funds.py:36", "message": "list_funds entry", "data": {"limit": limit, "sort": sort, "has_db": db is not None}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "A"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+    import json; log_data = {"location": "funds.py:36", "message": "list_funds API entry", "data": {"limit": limit, "sort": sort, "q": q, "has_db": db is not None}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "no-data-issue", "hypothesisId": "no-data"}; 
+    try:
+        with open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a") as f:
+            f.write(json.dumps(log_data) + "\n")
+    except Exception as e:
+        pass  # Don't fail if logging fails
     # #endregion
     service = FundService(db)
     
@@ -360,6 +365,9 @@ async def get_fund_by_id(
         404: Fund not found
         500: Server error
     """
+    # #region agent log
+    import json, time; entry_time = time.time(); log_data = {"location": "funds.py:get_fund_by_id", "message": "API endpoint entry", "data": {"fund_id": fund_id}, "timestamp": entry_time, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+    # #endregion
     service = FundService(db)
     
     try:
@@ -371,8 +379,19 @@ async def get_fund_by_id(
             )
         
         fund = await service.get_fund_by_id(fund_id.strip())
+        
+        # Round expense_ratio to 3 decimals if present
+        if fund.expense_ratio is not None:
+            fund.expense_ratio = round(fund.expense_ratio, 3)
+        
+        # #region agent log
+        exit_time = time.time(); log_data = {"location": "funds.py:get_fund_by_id", "message": "API endpoint exit", "data": {"fund_id": fund_id, "duration": exit_time - entry_time}, "timestamp": exit_time, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}; open("/Users/test/AutoInvest/FundAutoPilot/.cursor/debug.log", "a").write(json.dumps(log_data) + "\n")
+        # #endregion
         return fund
         
+    except HTTPException:
+        # Re-raise HTTPException (don't catch it in generic Exception handler)
+        raise
     except ValueError as e:
         error_msg = str(e)
         if "not found" in error_msg.lower():

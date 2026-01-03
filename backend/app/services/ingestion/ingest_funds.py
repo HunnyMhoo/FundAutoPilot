@@ -26,6 +26,7 @@ from app.core.database import sync_engine, SyncSessionLocal, Base
 from app.core.elasticsearch import get_elasticsearch_client
 from app.models.fund_orm import AMC, Fund
 from app.utils.normalization import normalize_search_text
+from app.utils.sec_api_client import SECAPIClient
 from app.services.search.elasticsearch_backend import ElasticsearchSearchBackend
 
 # Configure logging
@@ -48,6 +49,7 @@ class SECFundIngester:
         self.headers = {
             "Ocp-Apim-Subscription-Key": self.settings.sec_fund_factsheet_api_key
         }
+        self.api_client = SECAPIClient()  # For fetching class_fund data
         self.snapshot_id = datetime.now().strftime("%Y%m%d%H%M%S")
         self.stats = {
             "amcs_fetched": 0,
@@ -56,6 +58,7 @@ class SECFundIngester:
             "funds_active": 0,
             "funds_stored": 0,
             "funds_indexed": 0,
+            "classes_fetched": 0,
             "errors": 0,
         }
         # Initialize Elasticsearch backend if enabled
@@ -114,8 +117,11 @@ class SECFundIngester:
         self.stats["amcs_stored"] = len(amcs)
         logger.info(f"Stored {len(amcs)} AMCs")
     
-    def store_funds(self, session, funds: list[dict[str, Any]], amc_id: str) -> int:
-        """Upsert active funds into database and sync to Elasticsearch. Returns count stored."""
+    def store_funds(self, session, funds: list[dict[str, Any]], amc_id: str) -> tuple[int, list[dict[str, Any]]]:
+        """Upsert active funds into database and sync to Elasticsearch. Returns (count stored, es_docs).
+        
+        For funds with share classes, creates separate records for each class.
+        """
         stored = 0
         es_docs = []  # Collect documents for bulk indexing
         
@@ -124,91 +130,137 @@ class SECFundIngester:
             if fund_data.get("fund_status") != "RG":
                 continue
             
+            proj_id = fund_data["proj_id"]
             fund_name_en = fund_data.get("proj_name_en", fund_data.get("proj_name_th", "Unknown"))
             fund_abbr = fund_data.get("proj_abbr_name")
             
-            # Normalize fields for search
-            fund_name_norm = normalize_search_text(fund_name_en)
-            fund_abbr_norm = normalize_search_text(fund_abbr) if fund_abbr else None
-            
-            stmt = insert(Fund).values(
-                proj_id=fund_data["proj_id"],
-                fund_name_th=fund_data.get("proj_name_th"),
-                fund_name_en=fund_name_en,
-                fund_abbr=fund_abbr,
-                fund_name_norm=fund_name_norm,
-                fund_abbr_norm=fund_abbr_norm,
-                amc_id=amc_id,
-                fund_status=fund_data["fund_status"],
-                regis_date=self._parse_date(fund_data.get("regis_date")),
-                category=self._infer_category(fund_data),
-                risk_level=None,  # Not available from this API
-                expense_ratio=None,  # Would require per-fund API call
-                last_upd_date=self._parse_datetime(fund_data.get("last_upd_date")),
-                data_snapshot_id=self.snapshot_id,
-            )
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["proj_id"],
-                set_={
-                    "fund_name_th": stmt.excluded.fund_name_th,
-                    "fund_name_en": stmt.excluded.fund_name_en,
-                    "fund_abbr": stmt.excluded.fund_abbr,
-                    "fund_name_norm": stmt.excluded.fund_name_norm,
-                    "fund_abbr_norm": stmt.excluded.fund_abbr_norm,
-                    "fund_status": stmt.excluded.fund_status,
-                    "regis_date": stmt.excluded.regis_date,
-                    "category": stmt.excluded.category,
-                    "last_upd_date": stmt.excluded.last_upd_date,
-                    "data_snapshot_id": stmt.excluded.data_snapshot_id,
-                }
-            )
-            session.execute(stmt)
-            stored += 1
-            
-            # Prepare Elasticsearch document
-            if self.search_backend:
-                # Get AMC name for denormalization
-                amc_result = session.execute(
-                    select(AMC.name_en).where(AMC.unique_id == amc_id)
+            # Fetch share classes for this fund
+            classes, error = self.api_client.fetch_class_fund(proj_id)
+            if error is None and classes and len(classes) > 0:
+                # Fund has share classes - create separate record for each class
+                self.stats["classes_fetched"] += len(classes)
+                for class_data in classes:
+                    class_abbr_name = class_data.get("class_abbr_name", "")
+                    # Use class name as display abbreviation
+                    display_abbr = class_abbr_name if class_abbr_name else fund_abbr
+                    
+                    stored += self._store_fund_record(
+                        session, fund_data, amc_id, class_abbr_name, display_abbr, es_docs
+                    )
+            else:
+                # Fund has no classes - create single record with empty class_abbr_name
+                stored += self._store_fund_record(
+                    session, fund_data, amc_id, "", fund_abbr, es_docs
                 )
-                amc_name = amc_result.scalar_one_or_none() or "Unknown"
-                
-                # Calculate fee_band (None for now since expense_ratio not available)
-                fee_band = None
-                
-                es_docs.append({
-                    "fund_id": fund_data["proj_id"],
-                    "fund_name": fund_name_en,
-                    "fund_name_norm": fund_name_norm,
-                    "fund_abbr": fund_abbr,
-                    "fund_abbr_norm": fund_abbr_norm,
-                    "amc_id": amc_id,
-                    "amc_name": amc_name,
-                    "category": self._infer_category(fund_data),
-                    "risk_level": None,
-                    "expense_ratio": None,
-                    "fee_band": fee_band,
-                    "fund_status": fund_data["fund_status"],
-                })
+        
+        return stored, es_docs
+    
+    def _store_fund_record(
+        self, 
+        session, 
+        fund_data: dict[str, Any], 
+        amc_id: str, 
+        class_abbr_name: str,
+        display_abbr: str | None,
+        es_docs: list[dict[str, Any]]
+    ) -> int:
+        """Store a single fund record (for a specific class or fund without classes)."""
+        proj_id = fund_data["proj_id"]
+        fund_name_en = fund_data.get("proj_name_en", fund_data.get("proj_name_th", "Unknown"))
+        
+        # Normalize fields for search
+        fund_name_norm = normalize_search_text(fund_name_en)
+        fund_abbr_norm = normalize_search_text(display_abbr) if display_abbr else None
+        
+        stmt = insert(Fund).values(
+            proj_id=proj_id,
+            class_abbr_name=class_abbr_name,
+            fund_name_th=fund_data.get("proj_name_th"),
+            fund_name_en=fund_name_en,
+            fund_abbr=display_abbr,
+            fund_name_norm=fund_name_norm,
+            fund_abbr_norm=fund_abbr_norm,
+            amc_id=amc_id,
+            fund_status=fund_data["fund_status"],
+            regis_date=self._parse_date(fund_data.get("regis_date")),
+            category=self._infer_category(fund_data),
+            risk_level=None,  # Not available from this API
+            expense_ratio=None,  # Would require per-fund API call
+            last_upd_date=self._parse_datetime(fund_data.get("last_upd_date")),
+            data_snapshot_id=self.snapshot_id,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["proj_id", "class_abbr_name"],
+            set_={
+                "fund_name_th": stmt.excluded.fund_name_th,
+                "fund_name_en": stmt.excluded.fund_name_en,
+                "fund_abbr": stmt.excluded.fund_abbr,
+                "fund_name_norm": stmt.excluded.fund_name_norm,
+                "fund_abbr_norm": stmt.excluded.fund_abbr_norm,
+                "fund_status": stmt.excluded.fund_status,
+                "regis_date": stmt.excluded.regis_date,
+                "category": stmt.excluded.category,
+                "last_upd_date": stmt.excluded.last_upd_date,
+                "data_snapshot_id": stmt.excluded.data_snapshot_id,
+            }
+        )
+        session.execute(stmt)
+        
+        # Prepare Elasticsearch document
+        if self.search_backend:
+            # Use class_abbr_name as fund_id if it exists, otherwise use proj_id
+            fund_id = class_abbr_name if class_abbr_name else proj_id
+            
+            es_docs.append({
+                "fund_id": fund_id,
+                "proj_id": proj_id,
+                "class_abbr_name": class_abbr_name if class_abbr_name else None,
+                "fund_name": fund_name_en,
+                "fund_name_norm": fund_name_norm,
+                "fund_abbr": display_abbr,
+                "fund_abbr_norm": fund_abbr_norm,
+                "amc_id": amc_id,
+                "category": self._infer_category(fund_data),
+                "risk_level": None,  # Will be populated by enrichment
+                "risk_level_int": None,  # Will be populated by enrichment
+                "expense_ratio": None,  # Will be populated by enrichment
+                "fee_band": None,  # Will be populated by enrichment
+                "fund_status": fund_data["fund_status"],
+            })
+        
+        return 1  # Return 1 for each record stored
+    
+    def _bulk_index_elasticsearch(self, session, es_docs: list[dict[str, Any]], amc_id: str) -> None:
+        """Bulk index funds to Elasticsearch."""
+        if not self.search_backend or not es_docs:
+            return
+        
+        # Get AMC name for denormalization
+        amc_result = session.execute(
+            select(AMC.name_en).where(AMC.unique_id == amc_id)
+        )
+        amc_name = amc_result.scalar_one_or_none() or "Unknown"
+        
+        # Update ES docs with AMC name
+        for doc in es_docs:
+            doc["amc_name"] = amc_name
         
         # Bulk index to Elasticsearch (async in sync context)
-        if self.search_backend and es_docs:
+        try:
+            # Create new event loop for async operations
             try:
-                # Create new event loop for async operations
-                try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                
-                loop.run_until_complete(self.search_backend.initialize_index())
-                loop.run_until_complete(self.search_backend.bulk_index_funds(es_docs))
-                self.stats["funds_indexed"] += len(es_docs)
-            except Exception as e:
-                logger.warning(f"Failed to index funds to Elasticsearch: {e}")
-                self.stats["errors"] += 1
-        
-        return stored
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            loop.run_until_complete(self.search_backend.initialize_index())
+            loop.run_until_complete(self.search_backend.bulk_index_funds(es_docs))
+            self.stats["funds_indexed"] += len(es_docs)
+            logger.info(f"Indexed {len(es_docs)} funds to Elasticsearch for AMC {amc_id}")
+        except Exception as e:
+            logger.warning(f"Failed to index funds to Elasticsearch: {e}")
+            self.stats["errors"] += 1
     
     def _parse_datetime(self, value: str | None) -> datetime | None:
         """Parse datetime from SEC API format."""
@@ -278,10 +330,14 @@ class SECFundIngester:
                 active_count = sum(1 for f in funds if f.get("fund_status") == "RG")
                 self.stats["funds_active"] += active_count
                 
-                stored = self.store_funds(session, funds, amc_id)
+                stored, es_docs = self.store_funds(session, funds, amc_id)
                 self.stats["funds_stored"] += stored
                 
                 session.commit()
+                
+                # Bulk index to Elasticsearch after commit
+                if es_docs:
+                    self._bulk_index_elasticsearch(session, es_docs, amc_id)
                 
                 logger.info(f"  -> {len(funds)} total, {active_count} active, {stored} stored")
         
